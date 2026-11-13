@@ -2,6 +2,8 @@
 
 A Claude Code mod that collects every question Claude asks you into a panel docked beside the chat, so you can work through a long set of questions at your own pace instead of a few at a time.
 
+<p align="center"><img src="docs/panel.png" alt="The Question Panel in the Claude desktop app: two plans of questions, with answered questions marked green, a recommended pair of options in an orange bubble, and a suggested answer." width="360"></p>
+
 - **Every question in one list.** Nothing scrolls away or gets hidden while you answer. Questions can be grouped into sections, each with its own progress count.
 - **Click a question to open it.** Pick from Claude's options (single- or multi-select), type your own answer under **Other** (✓ to confirm), and add **Notes** that are sent along with your answer.
 - **Claude's recommendations, inline.** Recommended options sit together in a highlighted bubble with Claude's reason. Pick them one at a time, or use **★ Accept recommendations** to fill in every unanswered question.
