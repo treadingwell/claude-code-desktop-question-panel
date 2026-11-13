@@ -74,6 +74,8 @@ The mod never adds anything to prompts you type. It submits or fills a prompt in
 - **Put answers in prompt** (in the panel's top bar) puts that same text in your prompt box, replacing what's there, for you to review and send yourself.
 - **`/ask-me [topic]`** sends this message as yours: "Before going further, list every question you have for me about: *topic* (or: about the current task). Ask them all in a single call to the mcp__question-panel__ask_questions tool (no limit on the number; give options where they help), then end your turn and wait for my answers."
 
+The text of **Submit answers** and **Put answers in prompt** comes from the question set the mod keeps in the session's state: the questions Claude sent and the answers and notes you entered in the panel. Nothing else goes into it.
+
 When Claude's questions go to the panel, Claude's question call is answered with a short note that the questions are in the panel and that the answers will come as your next message. The panel's own tool description tells Claude how to ask and how to read the answers.
 
 ## Hooks
@@ -134,6 +136,8 @@ It changes no other setting and sets no environment variables.
 ## What the mod reads
 
 The mod reads only its own two settings (`surfaces` and `redirectBuiltin`, as Claude Code passes them to it) and the question set it keeps in the session's state. It asks for no keys, tokens, or other secrets, and reads nothing else from your machine: no files, environment variables, or other programs' output.
+
+It sends nothing off your machine. The one web address in the code, `http://www.w3.org/2000/svg` in `hooks/register.tsx`, is the standard SVG namespace name that the number badges' SVG drawings must carry. It identifies the drawing format and is never requested.
 
 ## Notes
 

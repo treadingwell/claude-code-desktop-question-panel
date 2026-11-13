@@ -291,7 +291,11 @@ const handoffText = (added: number, total: number) =>
   "otherwise end your turn immediately without further work or commentary beyond a one-line note that the questions are in the panel. Their answers will arrive as the user's next message."
 
 /**
- * A numbered circle: outlined and muted while open, filled green once
+ * A numbered circle, drawn locally as an SVG image. Its `xmlns` value is the
+ * standard SVG namespace name, which every SVG document carries; nothing is
+ * fetched from that address.
+ *
+ * Outlined and muted while open, filled green once
  * answered, filled amber when clarification was asked for. Mid-tone colors
  * so it reads on light and dark themes alike.
  */
@@ -407,9 +411,9 @@ export const register: Register = (on, options) => {
 
   // The built-in tool: answered here so its dialog never opens.
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
-    // Only Claude's own questions come here. A plugin asking through the dialog
-    // ($.ui.ask: a permission check, a confirmation) waits on the person's
-    // answer there, so it keeps the dialog.
+    // Only Claude's own questions come here. Another plugin asking through the
+    // dialog (a permission check, a confirmation) waits on the person's answer
+    // there, so it keeps the dialog.
     if (!active || next.origin.plugin !== 'engine') return next(e)
     if (!redirectBuiltin) return next(e)
     const qs = normalizeQuestions(e.questions)
