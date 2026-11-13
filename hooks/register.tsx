@@ -7,7 +7,6 @@ const PANE = 'question-panel'
 const TITLE = 'Questions'
 const TOOL = 'ask_questions'
 const TOOL_FULL = 'mcp__question-panel__ask_questions'
-const INTERCEPT_KEY = 'interceptAskUserQuestion'
 /** How the answers message starts; the panel clears once a prompt starting this way goes in. */
 const ANSWERS_MARKER = 'Answers'
 const ANSWERS_HEAD = /^Answers \(\d+\/\d+\):/
@@ -367,6 +366,9 @@ export const register: Register = (on, options) => {
   // "everywhere" turns the panel on in terminals too. session.start runs again
   // on every reload, so this is always set before the other hooks matter.
   const everywhere = (options as { surfaces?: unknown }).surfaces === 'everywhere'
+  // Settings, not anything read from the machine: whether Claude's built-in
+  // question prompt (AskUserQuestion) goes to the panel. A change reloads the mod.
+  const redirectBuiltin = (options as { redirectBuiltin?: unknown }).redirectBuiltin !== false
   let active = true
 
   on('session.start', async ($, e, next) => {
@@ -409,7 +411,7 @@ export const register: Register = (on, options) => {
     // ($.ui.ask: a permission check, a confirmation) waits on the person's
     // answer there, so it keeps the dialog.
     if (!active || next.origin.plugin !== 'engine') return next(e)
-    if ((await $.store.get(INTERCEPT_KEY)) === false) return next(e)
+    if (!redirectBuiltin) return next(e)
     const qs = normalizeQuestions(e.questions)
     if (qs.length === 0) return next(e)
     const total = await receive($, qs, e.tool_use_id)
@@ -425,12 +427,13 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'questions' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
+    // on/off change the plugin's own setting (redirectBuiltin), as /config does.
     if (arg === 'off') {
-      await $.store.set(INTERCEPT_KEY, false)
+      await $.config.set({ key: 'question-panel.redirectBuiltin', value: false })
       return { text: 'Question Panel: AskUserQuestion now uses its own dialog. The panel tool still works.' }
     }
     if (arg === 'on') {
-      await $.store.set(INTERCEPT_KEY, true)
+      await $.config.set({ key: 'question-panel.redirectBuiltin', value: true })
     }
     if (arg === 'clear') {
       await update($, panel, () => null)

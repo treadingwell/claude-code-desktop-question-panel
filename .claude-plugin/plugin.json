@@ -10,6 +10,12 @@
       "description": "\"desktop\" (default): only in the Claude desktop app; terminal sessions keep the built-in question prompt. \"everywhere\": also in terminal sessions.",
       "default": "desktop",
       "options": ["desktop", "everywhere"]
+    },
+    "redirectBuiltin": {
+      "type": "boolean",
+      "title": "Send Claude's built-in questions to the panel",
+      "description": "On (default): when Claude asks with the built-in question prompt (AskUserQuestion), the questions go to the panel instead. Off: the built-in dialog shows as usual. /questions on and /questions off change this.",
+      "default": true
     }
   },
   "license": "MIT",

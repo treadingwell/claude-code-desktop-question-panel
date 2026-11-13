@@ -37,7 +37,7 @@ const opened: string[] = []
 /** Tools the mod registered. */
 const registered: string[] = []
 
-function engine(on: any, sent: string[], intercept?: boolean) {
+function engine(on: any, sent: string[]) {
   submitted.length = 0
   opened.length = 0
   registered.length = 0
@@ -51,7 +51,6 @@ function engine(on: any, sent: string[], intercept?: boolean) {
     return { value: { isPlaced: true } }
   })
   on('ui.toast', () => ({ value: undefined }))
-  on('store.get', () => ({ value: intercept }))
   on('prompt.submit', (_: unknown, e: any) => {
     submitted.push(e.text)
     return { text: e.text }
@@ -490,6 +489,16 @@ test('surfaces = everywhere: the panel runs in a terminal session too', { option
   const sent: string[] = []
   engine(on, sent)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(registered).toContain('ask_questions')
+})
+
+test('redirectBuiltin = false: the built-in dialog shows; the panel tool still works', { options: { redirectBuiltin: false } } as any, async ($: any, on: any) => {
+  const sent: string[] = []
+  engine(on, sent)
+  on('tool.call', { tool: 'AskUserQuestion' }, () => ({ result: { answers: { q: 'dialog' } } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ran: any = await $.tool.call({ tool: 'AskUserQuestion', questions: [{ question: 'A?', header: 'H', multiSelect: false, options: [{ label: 'x', description: '' }, { label: 'y', description: '' }] }] } as any)
+  expect(ran.result.answers.q).toBe('dialog')
   expect(registered).toContain('ask_questions')
 })
 

@@ -52,9 +52,47 @@ In the Claude desktop app, where `/plugin` doesn't run: click **+** next to the 
 You don't need to set anything up:
 
 - The mod adds a question tool that Claude always sees. Its description tells Claude to use it whenever it has questions for you, with no limit on how many, and to add groups and recommendations.
-- When Claude asks with Claude Code's built-in question prompt instead, those questions go to the panel as well. Questions that other plugins ask, such as permission checks, still use the normal dialog.
+- When Claude asks with Claude Code's built-in question prompt instead, those questions go to the panel as well (see [Standing in for AskUserQuestion](#standing-in-for-askuserquestion)). Questions that other plugins ask, such as permission checks, still use the normal dialog.
 
 If you ever find Claude not using the panel, add a line like "Ask me questions with the Question Panel tool" to your `CLAUDE.md`.
+
+## Standing in for AskUserQuestion
+
+The mod stands in for one tool: Claude Code's built-in `AskUserQuestion`. It does so only when all of these hold:
+
+- the session runs in the Claude desktop app (or the **Where the Question Panel runs** setting is `everywhere`);
+- the **Send Claude's built-in questions to the panel** setting is on (the default);
+- Claude itself made the call. Calls another plugin makes, such as a permission check, always get the normal dialog.
+
+In that case the mod puts the questions in the panel and answers the call itself, so the built-in dialog doesn't open. Claude is told the questions are in the panel and to wait. The answers then arrive as your next message. In every other case the call goes on to the built-in dialog unchanged.
+
+## What the mod sends to Claude
+
+The mod never adds anything to prompts you type. It submits or fills a prompt in three cases, each started by you:
+
+- **Submit answers** (in the band above the prompt, or under the last question once every question is answered) sends your answers as your message, in the compact form shown above: a first line `Answers (answered/total):`, then one line per question with its number, short label, your answer, and any note.
+- **Put answers in prompt** (in the panel's top bar) puts that same text in your prompt box, replacing what's there, for you to review and send yourself.
+- **`/ask-me [topic]`** sends this message as yours: "Before going further, list every question you have for me about: *topic* (or: about the current task). Ask them all in a single call to the mcp__question-panel__ask_questions tool (no limit on the number; give options where they help), then end your turn and wait for my answers."
+
+When Claude's questions go to the panel, Claude's question call is answered with a short note that the questions are in the panel and that the answers will come as your next message. The panel's own tool description tells Claude how to ask and how to read the answers.
+
+## Hooks
+
+What each of the mod's hooks does:
+
+| Hook | What it does |
+| --- | --- |
+| `session.start` | Decides whether the mod runs in this session (desktop app, or everywhere per the setting). If it does, registers the `ask_questions` tool and the `/questions` and `/ask-me` commands. |
+| `tool.call` on `mcp__question-panel__ask_questions` | The mod's own tool: puts Claude's questions in the panel, opens it, and answers the call with the note above. |
+| `tool.call` on `AskUserQuestion` | Stands in for the built-in tool as described above; otherwise passes the call on unchanged. If anything fails, the built-in dialog opens as usual. |
+| `command.run` on `questions` | Opens the panel; `on` and `off` change the **Send Claude's built-in questions to the panel** setting; `clear` empties the panel. |
+| `command.run` on `ask-me` | Opens the panel and sends the `/ask-me` message above. |
+| `prompt.submit` | Watches for a submitted message that starts with `Answers (n/n):` and, once it has gone in, clears the panel. It never changes or blocks a prompt. |
+| `ui.render` on `Pane` | Draws the Question Panel. |
+| `ui.render` on `AbovePrompt` | Draws the band above the prompt (progress, **Submit answers**, **Show panel**) while questions are waiting; otherwise draws nothing. |
+| `ui.render` on `ToolUse` | Adds an **Open Question Panel** button under the chat row of a question call the panel took; leaves every other row as it is. |
+
+The mod keeps the open question set and your answers in the session's state, so they survive the mod reloading. It reads no files, runs no programs, and makes no network requests.
 
 ## Commands
 
@@ -62,8 +100,8 @@ If you ever find Claude not using the panel, add a line like "Ask me questions w
 | --- | --- |
 | `/ask-me [topic]` | Asks Claude to put all of its questions about a topic, or the current task, into the panel. |
 | `/questions` | Opens the panel. |
-| `/questions off` | Lets Claude's built-in question prompt use its own dialog again (the panel's tool still works). |
-| `/questions on` | Sends the built-in question prompt to the panel again. |
+| `/questions off` | Turns off **Send Claude's built-in questions to the panel**: the built-in question prompt uses its own dialog again (the panel's tool still works). |
+| `/questions on` | Turns that setting back on. |
 | `/questions clear` | Empties the panel. |
 
 ## Settings
@@ -79,6 +117,11 @@ To use it in terminal sessions too, set **Where the Question Panel runs** to `ev
   }
 }
 ```
+
+| Setting | Values | Default |
+| --- | --- | --- |
+| `surfaces`: Where the Question Panel runs | `desktop`, `everywhere` | `desktop` |
+| `redirectBuiltin`: Send Claude's built-in questions to the panel | on, off (`/questions on`, `/questions off`) | on |
 
 ## Notes
 
