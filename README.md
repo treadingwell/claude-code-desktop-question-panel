@@ -45,7 +45,11 @@ From a shell:
 claude plugin install question-panel --marketplace treadingwell/claude-code-desktop-question-panel
 ```
 
-In the Claude desktop app, where `/plugin` doesn't run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `treadingwell/claude-code-desktop-question-panel`, then **Add plugin**.
+In the Claude desktop app, where `/plugin` doesn't run:
+
+1. Click **+** on the left of the prompt box, then **Browse plugins**.
+2. Click **Add**, then **Add marketplace**, and enter `treadingwell/claude-code-desktop-question-panel`.
+3. Add **question-panel** from that marketplace.
 
 ## How Claude uses it
 
