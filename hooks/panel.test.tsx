@@ -99,13 +99,15 @@ for (const surface of ['desktop', 'terminal'] as const) {
     await ui.press({ key: 'send' })
     expect(sent).toHaveLength(1)
     const msg = sent[0]!
-    expect(msg).toContain('(4/10 answered)')
-    expect(msg).toContain('1. Q: Which language should the backend use?\n   -> Go\n   -> Notes: team knows Go')
-    expect(msg).toContain('2. Q: Which databases do you need?\n   -> Postgres, Redis')
-    expect(msg).toContain('3. Q: What is the project called?\n   -> Atlas')
-    expect(msg).toContain('4. Q: Host where?\n   -> Other: Hetzner')
-    expect(msg).toContain('5. Q: Need auth?\n   -> (skipped)')
-    expect(msg).toContain('10. Q: Anything else I should know?\n   -> (skipped)')
+    // Compact: number + short label, never the question's full text.
+    expect(msg.split('\n')[0]).toBe('Answers (4/10):')
+    expect(msg).toContain('\n1 Language: Go. note: team knows Go\n')
+    expect(msg).toContain('\n2 DB: Postgres, Redis\n')
+    expect(msg).toContain('\n3 What is the project called?: Atlas\n')
+    expect(msg).toContain('\n4 Host where?: other: Hetzner\n')
+    expect(msg).toContain('\n5 Need auth?: skipped\n')
+    expect(msg).toContain('\n10 Anything else I should know?: skipped')
+    expect(msg).not.toContain('Which language should the backend use')
 
     // Filled into the prompt box, not yet sent.
     expect(await ui.find({ key: 'send' })).toBeDefined()
@@ -147,9 +149,11 @@ test('questions are grouped under headings, in the panel and in the message', as
 
   await ui.press({ key: 'send' })
   const msg = sent[0]!
-  expect(msg).toContain('## Backend')
-  expect(msg.indexOf('11. Q: ORM or raw SQL?')).toBeLessThan(msg.indexOf('## Process'))
-  expect(msg).toContain('## Process\n\n5. Q: Need auth?\n   -> Yes')
+  expect(msg).toContain('## Backend\n1 Language: skipped')
+  // The late Backend question is Backend's 5th, listed before Process.
+  expect(msg.indexOf('\n5 ORM or raw SQL?: skipped')).toBeLessThan(msg.indexOf('## Process'))
+  // Numbering restarts in each group.
+  expect(msg).toContain('## Process\n1 Need auth?: Yes\n')
   await ui.unmount()
 })
 
@@ -213,12 +217,16 @@ test('recommendations: shown, accepted per question or all at once, marked in th
 
   await ui.press({ key: 'send' })
   const msg = sent[0]!
-  expect(msg).toContain('(4/5 answered)')
-  expect(msg).toContain('1. Q: Which language?\n   -> Go (recommended)')
-  expect(msg).toContain('2. Q: Need auth?\n   -> Yes (recommended)')
-  expect(msg).toContain('3. Q: Project name?\n   -> Atlas')
-  expect(msg).toContain('4. Q: Platforms?\n   -> Web (recommended), iOS (recommended)')
-  expect(msg).toContain('5. Q: No recommendation here?\n   -> (skipped)')
+  expect(msg).toBe(
+    [
+      'Answers (4/5):',
+      '1 Which language?: Go',
+      '2 Need auth?: Yes',
+      '3 Project name?: Atlas',
+      '4 Platforms?: Web, iOS',
+      '5 No recommendation here?: skipped',
+    ].join('\n'),
+  )
   await ui.unmount()
 })
 
@@ -251,10 +259,15 @@ test('notes alone are not an answer (sent with the skipped question); please cla
 
   await ui.press({ key: 'send' })
   const msg = sent[0]!
-  expect(msg).toContain('1. Q: Which cache?\n   -> PLEASE CLARIFY: I need more context before answering\n   -> Notes: Cache for what, sessions?')
-  expect(msg).toContain('2. Q: Retention policy?\n   -> (skipped)\n   -> Notes: Ask legal first')
-  expect(msg).toContain('3. Q: Anything else?\n   -> (skipped)')
-  expect(msg).toContain('I marked question 1 "please clarify"')
+  // CLARIFY sits on the answer itself; no separate summary line.
+  expect(msg).toBe(
+    [
+      'Answers (1/3):',
+      '1 Which cache?: CLARIFY. note: Cache for what, sessions?',
+      '2 Retention policy?: skipped. note: Ask legal first',
+      '3 Anything else?: skipped',
+    ].join('\n'),
+  )
   await ui.unmount()
 })
 
@@ -376,7 +389,7 @@ test('band above the prompt: progress and send while questions wait, gone after'
   expect(submitted).toHaveLength(1)
   // Sent directly as a prompt, not filled into the box; band and panel clear.
   expect(sent).toHaveLength(0)
-  expect(submitted[0]).toContain('(1/10 answered)')
+  expect(submitted[0]).toContain('Answers (1/10):')
   expect(await band.find({ key: 'band-send' })).toBeUndefined()
   expect((await pane.find({ type: 'Text', text: /No questions yet/ }))?.text).toBeDefined()
   await band.unmount()
@@ -432,6 +445,27 @@ test('a question call row in the chat has an Open Question Panel button', async 
   const dialog = await $.ui.mount(ROW('AskUserQuestion', { answers: { a: 'b' } }))
   expect(await dialog.find({ key: 'open-panel' })).toBeUndefined()
   await dialog.unmount()
+})
+
+test('plans: Plan 1 and Plan 2 each number their questions from 1', async ($, on) => {
+  const sent: string[] = []
+  engine(on, sent)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const plan = (name: string) =>
+    [1, 2, 3].map(n => ({ group: name, header: `${name[name.length - 1]}-${n}`, question: `${name} question ${n}?`, options: [{ label: 'a' }, { label: 'b' }] }))
+  await $.tool.call({ tool: TOOL, questions: [...plan('Plan 1'), ...plan('Plan 2')] } as any)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const tree = JSON.stringify(await ui.drawn())
+  expect(tree).toContain('Question Plan 1 3, not answered')
+  expect(tree).toContain('Question Plan 2 1, not answered')
+  expect(tree).not.toContain('Question Plan 2 4')
+  await ui.press({ key: 'g1' }) // open Plan 2
+  await ui.press({ key: 'q4-o1' }) // Plan 2, question 2
+  await ui.press({ key: 'send' })
+  expect(sent[0]).toBe(
+    ['Answers (1/6):', '## Plan 1', '1 1-1: skipped', '2 1-2: skipped', '3 1-3: skipped', '## Plan 2', '1 2-1: skipped', '2 2-2: b', '3 2-3: skipped'].join('\n'),
+  )
+  await ui.unmount()
 })
 
 test('AskUserQuestion is answered by the panel and calls accumulate', async ($, on) => {

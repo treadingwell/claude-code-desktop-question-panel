@@ -8,7 +8,9 @@ const TITLE = 'Questions'
 const TOOL = 'ask_questions'
 const TOOL_FULL = 'mcp__question-panel__ask_questions'
 const INTERCEPT_KEY = 'interceptAskUserQuestion'
-const ANSWERS_MARKER = 'Here are my answers from the Question Panel'
+/** How the answers message starts; the panel clears once a prompt starting this way goes in. */
+const ANSWERS_MARKER = 'Answers'
+const ANSWERS_HEAD = /^Answers \(\d+\/\d+\):/
 const RECOMMENDED_SUFFIX = /\s*\(recommended\)\s*$/i
 /** The muted gray of open badges and the toggle's outline and arrow. */
 const MUTED = '#8b8b8b'
@@ -126,28 +128,57 @@ export function groupQuestions(qs: PanelQuestion[]): { name?: string; indices: n
   return out
 }
 
+/**
+ * A question's number as shown: counted within its group, so "Plan 1: 1, 2, 3"
+ * and "Plan 2: 1, 2, 3" keep Claude's own numbering. Ungrouped questions are
+ * counted among the ungrouped ones.
+ */
+export function questionNumber(qs: PanelQuestion[], i: number): number {
+  const g = qs[i]?.group
+  let n = 0
+  for (let k = 0; k <= i; k++) if (qs[k]?.group === g) n++
+  return n
+}
+
+/** A short label for the answers message: the header, or the question's first words. */
+export function shortLabel(q: PanelQuestion): string {
+  if (q.header) return q.header
+  const words = q.question.replace(/\s+/g, ' ').trim().split(' ')
+  return words.length > 6 ? `${words.slice(0, 6).join(' ')}…` : q.question.trim()
+}
+
+/**
+ * One answer, compact: the picked options, Other, or CLARIFY. Recommendations
+ * are not marked: Claude made them and can compare for itself.
+ */
+function compactAnswer(q: PanelQuestion, a: PanelAnswer): string {
+  const parts = [...a.selected]
+  if (a.other.trim()) parts.push(q.options.length ? `other: ${a.other.trim()}` : a.other.trim())
+  const choice = parts.join(', ')
+  if (a.clarify) return choice ? `CLARIFY (leaning: ${choice})` : 'CLARIFY'
+  return choice || 'skipped'
+}
+
+/**
+ * The answers message, compact: Claude has its own questions in context, so
+ * each answer carries its number and a short label (in case older turns were
+ * summarized), not the question's text.
+ */
 export function formatAnswers(set: PanelSet): string {
   const total = set.questions.length
   const done = set.questions.filter((_, i) => isAnswered(set.answers[i])).length
-  const lines = [`${ANSWERS_MARKER} (${done}/${total} answered):`, '']
+  const lines = [`${ANSWERS_MARKER} (${done}/${total}):`]
   for (const g of groupQuestions(set.questions)) {
-    if (g.name !== undefined) lines.push(`## ${g.name}`, '')
+    if (g.name !== undefined) lines.push(`## ${g.name}`)
     for (const i of g.indices) {
       const q = set.questions[i]!
       const a = set.answers[i] ?? emptyAnswer()
-      lines.push(`${i + 1}. Q: ${q.question}`)
-      lines.push(`   -> ${isAnswered(a) ? answerSummary(q, a) : '(skipped)'}`)
-      if (a.notes.trim()) lines.push(`   -> Notes: ${a.notes.trim().replace(/\n/g, '\n      ')}`)
-      lines.push('')
+      const n = questionNumber(set.questions, i)
+      const notes = a.notes.trim().replace(/\s*\n\s*/g, ' / ')
+      lines.push(`${n} ${shortLabel(q)}: ${compactAnswer(q, a)}${notes ? `. note: ${notes}` : ''}`)
     }
   }
-  const unclear = set.questions.map((_, i) => i + 1).filter(n => set.answers[n - 1]?.clarify)
-  if (unclear.length) {
-    lines.push(
-      `I marked question${unclear.length > 1 ? 's' : ''} ${unclear.join(', ')} "please clarify": explain what you are asking and why it matters (with your recommendation), then ask ${unclear.length > 1 ? 'them' : 'it'} again.`,
-    )
-  }
-  return lines.join('\n').trimEnd()
+  return lines.join('\n')
 }
 
 /**
@@ -199,11 +230,12 @@ const TOOL_DESCRIPTION = [
   'Use this INSTEAD of AskUserQuestion whenever you have questions for the user, and always when you have more than 4.',
   'Put ALL your questions in ONE call: there is no limit on how many.',
   'Each question may have options (single-select by default, multiSelect: true for several); the panel always adds a free-text "Other" box and a notes box, so never add an "Other" option yourself.',
-  'Questions with no options get a free-text answer box.',
+  'Questions with no options get a free-text answer box (no notes box).',
+  'Give every question a short `header` (1-3 words): it labels the answer in the reply.',
   'Whenever you have a view, give a recommendation: set recommended: true on the option(s) you recommend and put a one-line reason in `recommendation` (for an open-ended question, put your suggested answer there). The user can accept recommendations with one click.',
-  'The user may answer "PLEASE CLARIFY" on a question: then explain it (what you are asking, why it matters, your recommendation) and ask it again with this tool.',
-  'For more than about 6 questions, give each a `group` (a short section name such as "Backend" or "Deployment") so related questions are shown together.',
-  "After calling this, end your turn immediately without further work: the user's answers arrive as their next message (sent from the normal prompt box), formatted as Q -> answer -> notes, with unanswered questions marked (skipped).",
+  'Use `group` for sections: for more than about 6 questions, and whenever your questions come in sets such as "Plan 1" and "Plan 2". Numbering restarts at 1 in each group, so Plan 1 questions 1-3 and Plan 2 questions 1-3 keep their numbers.',
+  "After calling this, end your turn immediately without further work. The user's answers arrive as their next message in this compact form: a first line `Answers (answered/total):`, a `## Group` line before each group's answers, then one line per question: `<number> <header>: <answer>`, where the answer is the picked option(s), `other: <text>`, the free-text answer, `skipped`, or `CLARIFY`; `. note: <text>` follows when the user added a note. Match answers to your questions by group and number.",
+  'An answer of `CLARIFY` means the user wants that question explained: explain it (what you are asking, why it matters, your recommendation) and ask it again with this tool.',
 ].join(' ')
 
 const TOOL_SCHEMA = {
@@ -217,10 +249,10 @@ const TOOL_SCHEMA = {
         type: 'object',
         properties: {
           question: { type: 'string', description: 'The full question.' },
-          header: { type: 'string', description: 'Optional short tag (1-3 words), shown as a chip.' },
+          header: { type: 'string', description: 'Short tag (1-3 words): shown above the question and used to label its answer in the reply.' },
           group: {
             type: 'string',
-            description: 'Optional section name. Questions with the same group are shown together under that heading, with their own progress count.',
+            description: 'Optional section name, such as "Plan 1". Questions with the same group are shown together under that heading, with their own progress count, numbered from 1 within the group.',
           },
           options: {
             type: 'array',
@@ -414,7 +446,7 @@ export const register: Register = on => {
   // so a dropped or refused prompt leaves the answers where they were.
   on('prompt.submit', async ($, e, next) => {
     const entered = await next(e)
-    const wasAnswers = e.text.trimStart().startsWith(ANSWERS_MARKER) && !('drop' in entered && entered.drop)
+    const wasAnswers = ANSWERS_HEAD.test(e.text.trimStart()) && !('drop' in entered && entered.drop)
     if (wasAnswers) {
       // Keep the Collapse answered toggle for the next set.
       await update($, panel, s => (s ? { ...s, questions: [], answers: [], expanded: [], sentAt: Date.now() } : s))
@@ -541,14 +573,15 @@ export const register: Register = on => {
       const answered = isAnswered(a)
       const summary = answerSummary(q, a)
       const rec = recommendedLabel(q)
+      const num = questionNumber(set.questions, i)
       const followsRec = rec !== undefined && sameAnswer(applyRecommendation(q, a), a)
       return (
         <Box key={`card-${i}`} flexDirection="column" borderStyle="round" paddingX={1}>
           <Box flexDirection="row" gap={1} alignItems="flex-start">
             {Svg ? (
               <Svg
-                source={badgeSvg(i + 1, a.clarify ? 'clarify' : answered ? 'answered' : 'open')}
-                alt={`Question ${i + 1}, ${a.clarify ? 'clarification requested' : answered ? 'answered' : 'not answered'}`}
+                source={badgeSvg(num, a.clarify ? 'clarify' : answered ? 'answered' : 'open')}
+                alt={`Question ${q.group ? `${q.group} ` : ''}${num}, ${a.clarify ? 'clarification requested' : answered ? 'answered' : 'not answered'}`}
                 width={28}
                 height={28}
               />
@@ -558,7 +591,7 @@ export const register: Register = on => {
                 color={a.clarify || answered ? 'inverseText' : 'subtle'}
                 backgroundColor={a.clarify ? 'warning' : answered ? 'success' : undefined}
               >
-                {` ${i + 1} `}
+                {` ${num} `}
               </Text>
             )}
             <Box flexDirection="column" flexGrow={1} flexShrink={1}>

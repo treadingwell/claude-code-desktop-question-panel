@@ -11,15 +11,21 @@ A Claude Code mod that collects every question Claude asks you into a panel dock
 - **Easy to get back to.** Each time Claude asks, the chat shows an **Open Question Panel** button under the question call, so you can reopen the panel if you closed it.
 - **Submit from anywhere.** A band above the prompt box shows your progress with a **Submit answers** button. When every question is answered, a second **Submit answers** button appears under the last question. **Put answers in prompt** in the panel's top bar fills the prompt box instead, so you can review before sending.
 
-Answers are sent as one message in this form:
+Answers are sent as one compact message. Claude already has its questions in context, so each answer carries only its number and a short label, not the question's text:
 
 ```
-1. Q: Which language should the backend use?
-   -> Go (recommended)
-   -> Notes: the team already knows it
-2. Q: Need auth?
-   -> (skipped)
+Answers (3/6):
+## Plan 1
+1 Language: Go. note: the team already knows it
+2 Auth: skipped
+3 Hosting: other: Hetzner
+## Plan 2
+1 Language: TypeScript
+2 Auth: CLARIFY
+3 Hosting: skipped
 ```
+
+Numbering restarts in each group, so questions Claude sends as "Plan 1: 1, 2, 3" and "Plan 2: 1, 2, 3" keep their numbers. `CLARIFY` asks Claude to explain that question and ask it again.
 
 The panel empties once the message has been received.
 
