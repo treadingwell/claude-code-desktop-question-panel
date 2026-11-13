@@ -28,8 +28,15 @@ export type PanelSet = {
   sentAt?: number
 }
 
+/**
+ * Text typed into Other/Answer and Notes boxes, not yet saved into the set:
+ * keyed `<set id>|<question index>|other` or `|notes`. The panel never draws
+ * from it, so typing does not redraw the panel and lose keys.
+ */
+export type PanelDrafts = Record<string, string>
+
 declare module 'claude-code' {
   interface PluginState {
-    'question-panel': { set: Shaped<PanelSet | null> }
+    'question-panel': { set: Shaped<PanelSet | null>; drafts: Shaped<PanelDrafts> }
   }
 }

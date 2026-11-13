@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const TOOL = 'mcp__question-panel__ask_questions'
 
@@ -36,8 +36,11 @@ const submitted: string[] = []
 const opened: string[] = []
 /** Tools the mod registered. */
 const registered: string[] = []
+/** The mocked clock: typing is saved once it pauses, so tests advance it. */
+let clock: { advance: (ms: number) => Promise<void> }
 
 function engine(on: any, sent: string[]) {
+  clock = mock.clock(on)
   submitted.length = 0
   opened.length = 0
   registered.length = 0
@@ -99,6 +102,8 @@ for (const surface of ['desktop', 'terminal'] as const) {
     // Q4: "Other" text instead of an option.
     await ui.press({ key: 'q3' })
     await ui.input({ key: 'q3-other', text: 'Hetzner', kind: 'change' })
+    // Typing is saved into the set once it pauses.
+    await clock.advance(1000)
 
     expect((await ui.find({ type: 'Text', text: /4\/10 answered/ }))?.text).toBeDefined()
 
@@ -412,6 +417,7 @@ test('Submit answers appears under the last question only once all are answered'
   expect(await ui.find({ key: 'submit-bottom' })).toBeUndefined()
   await ui.press({ key: 'q1' })
   await ui.input({ key: 'q1-other', text: 'b', kind: 'change' })
+  await clock.advance(1000)
   expect((await ui.find({ key: 'submit-bottom' }))?.text).toBe('Submit answers')
   await ui.press({ key: 'submit-bottom' })
   expect(submitted).toHaveLength(1)
@@ -500,6 +506,37 @@ test('redirectBuiltin = false: the built-in dialog shows; the panel tool still w
   const ran: any = await $.tool.call({ tool: 'AskUserQuestion', questions: [{ question: 'A?', header: 'H', multiSelect: false, options: [{ label: 'x', description: '' }, { label: 'y', description: '' }] }] } as any)
   expect(ran.result.answers.q).toBe('dialog')
   expect(registered).toContain('ask_questions')
+})
+
+test('fast typing does not redraw the panel; the text is saved once typing pauses', async ($, on) => {
+  const sent: string[] = []
+  engine(on, sent)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, questions: [{ question: 'A?', header: 'A', options: [{ label: 'x' }, { label: 'y' }] }, { question: 'B?', header: 'B', options: [{ label: 'x' }, { label: 'y' }] }] } as any)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  // Several quick keys: the field's drawn value never jumps back mid-typing.
+  for (const text of ['h', 'he', 'hel', 'hell', 'hello']) {
+    await ui.input({ key: 'q0-notes', text, kind: 'change' })
+    expect((await ui.find({ key: 'q0-notes' }))?.props).toMatchObject({ value: '' })
+  }
+  // A short pause is not yet a save...
+  await clock.advance(300)
+  expect((await ui.find({ key: 'q0-notes' }))?.props).toMatchObject({ value: '' })
+  // ...a full pause is, with every key kept.
+  await clock.advance(500)
+  expect((await ui.find({ key: 'q0-notes' }))?.props).toMatchObject({ value: 'hello' })
+
+  // Clicking something else saves pending typing at once.
+  await ui.input({ key: 'q0-other', text: 'quick', kind: 'change' })
+  await ui.press({ key: 'q1' })
+  expect((await ui.find({ key: 'q0-other' }))?.props).toMatchObject({ value: 'quick' })
+
+  // And sending right after typing includes the latest keys.
+  await ui.input({ key: 'q0-notes', text: 'hello world', kind: 'change' })
+  await ui.press({ key: 'send' })
+  expect(sent[0]).toContain('1 A: other: quick. note: hello world')
+  await ui.unmount()
 })
 
 test('AskUserQuestion is answered by the panel and calls accumulate', async ($, on) => {

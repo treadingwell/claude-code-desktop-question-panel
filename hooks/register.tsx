@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { PanelAnswer, PanelOption, PanelQuestion, PanelSet } from '../types'
+import type { PanelAnswer, PanelDrafts, PanelOption, PanelQuestion, PanelSet } from '../types'
 
 const PANE = 'question-panel'
 const TITLE = 'Questions'
@@ -19,6 +19,42 @@ const MUTED = '#8b8b8b'
 const panel = atom({ plugin: 'question-panel', key: 'set' } as const, null, {
   shape: 'set-1',
 })
+// Typed text waiting to be saved into the set (see PanelDrafts). Written on
+// every key, read only when saving, so typing never redraws the panel.
+const drafts = atom({ plugin: 'question-panel', key: 'drafts' } as const, {} as PanelDrafts, {
+  shape: 'drafts-1',
+})
+/** How long typing must pause before the typed text is saved into the set. */
+const DRAFT_SAVE_MS = 700
+
+export const draftKey = (setId: string, i: number, field: 'other' | 'notes') => `${setId}|${i}|${field}`
+
+/** The set with the drafts typed into it applied to its answers. */
+export function applyDrafts(set: PanelSet, d: PanelDrafts): PanelSet {
+  const prefix = `${set.id}|`
+  let answers: PanelAnswer[] | undefined
+  for (const [key, text] of Object.entries(d)) {
+    if (!key.startsWith(prefix)) continue
+    const [, idx, field] = key.split('|')
+    const i = Number(idx)
+    if (!Number.isInteger(i) || !set.questions[i] || (field !== 'other' && field !== 'notes')) continue
+    answers ??= [...set.answers]
+    answers[i] = { ...(answers[i] ?? { selected: [], other: '', notes: '' }), [field]: text }
+  }
+  return answers ? { ...set, answers } : set
+}
+
+/** Saves typed drafts into the set (one redraw), then forgets the saved ones. */
+async function commitDrafts($: EngineInterface) {
+  const d = await read($, drafts)
+  if (Object.keys(d).length === 0) return
+  await update($, panel, s => (s ? applyDrafts(s, d) : s))
+  await update($, drafts, cur => {
+    const rest = { ...cur }
+    for (const key of Object.keys(d)) if (rest[key] === d[key]) delete rest[key]
+    return rest
+  })
+}
 
 // ---------- pure helpers (exported for tests) ----------
 
@@ -323,6 +359,7 @@ export function escapeMarkdown(s: string): string {
  * Enter to send them, and the panel clears once they are received.
  */
 async function fillAnswers($: EngineInterface) {
+  await commitDrafts($)
   const s = await read($, panel)
   if (!s || s.sentAt !== undefined || s.questions.length === 0) return
   await $.prompt.fill({ text: formatAnswers(s), mode: 'replace' })
@@ -334,6 +371,7 @@ async function fillAnswers($: EngineInterface) {
  * then clears the panel once the message has gone in.
  */
 async function submitAnswers($: EngineInterface) {
+  await commitDrafts($)
   const s = await read($, panel)
   if (!s || s.sentAt !== undefined || s.questions.length === 0) return
   // Claim the set before submitting, so a second click while the first is in
@@ -374,6 +412,8 @@ export const register: Register = (on, options) => {
   // question prompt (AskUserQuestion) goes to the panel. A change reloads the mod.
   const redirectBuiltin = (options as { redirectBuiltin?: unknown }).redirectBuiltin !== false
   let active = true
+  // The pending "save typed text" timer, restarted on each key.
+  let draftTimer: Timer | undefined
 
   on('session.start', async ($, e, next) => {
     active = everywhere || e.surface !== 'terminal'
@@ -546,19 +586,35 @@ export const register: Register = (on, options) => {
 
     // `decided`: the press settles the question (a single pick, a recommendation,
     // clarify, Enter in the answer box); typing and multi-picks never collapse.
-    const edit = (i: number, fn: (a: PanelAnswer, q: PanelQuestion) => PanelAnswer, decided = false) =>
-      update($, panel, s => {
+    // Typing goes to the drafts, which the panel does not draw from, so a key
+    // never redraws the panel (that redraw put back older text and lost keys).
+    // The text is saved into the set once typing pauses, or before any other
+    // action redraws the panel.
+    const typed = (i: number, field: 'other' | 'notes', v: string) => {
+      void update($, drafts, d => ({ ...d, [draftKey(set.id, i, field)]: v }))
+      draftTimer?.cancel()
+      draftTimer = $.clock.after(DRAFT_SAVE_MS, () => void commitDrafts($))
+    }
+
+    const edit = async (i: number, fn: (a: PanelAnswer, q: PanelQuestion) => PanelAnswer, decided = false) => {
+      await commitDrafts($)
+      return update($, panel, s => {
         if (!s || s.id !== set.id || !s.questions[i]) return s
         const answers = [...s.answers]
         answers[i] = fn(answers[i] ?? emptyAnswer(), s.questions[i])
         const changed = { ...s, answers }
         return decided ? settle(changed, i) : changed
       })
+    }
+
+    // Any other action that redraws the panel saves the typed text first.
+    const saveThen = (fn: (s: PanelSet) => PanelSet | null) => async () => {
+      await commitDrafts($)
+      await update($, panel, s => (s ? fn(s) : s))
+    }
 
     const toggleOpen = (i: number) =>
-      update($, panel, s =>
-        s ? { ...s, expanded: s.expanded.includes(i) ? s.expanded.filter(x => x !== i) : [...s.expanded, i] } : s,
-      )
+      saveThen(s => ({ ...s, expanded: s.expanded.includes(i) ? s.expanded.filter(x => x !== i) : [...s.expanded, i] }))()
 
     const pick = (i: number, label: string) =>
       edit(i, (a, q) => {
@@ -573,16 +629,10 @@ export const register: Register = (on, options) => {
     const send = () => fillAnswers($)
 
     const toggleGroup = (indices: number[], isOpen: boolean) =>
-      update($, panel, s =>
-        s
-          ? {
-              ...s,
-              expanded: isOpen
-                ? s.expanded.filter(x => !indices.includes(x))
-                : [...new Set([...s.expanded, ...indices])],
-            }
-          : s,
-      )
+      saveThen(s => ({
+        ...s,
+        expanded: isOpen ? s.expanded.filter(x => !indices.includes(x)) : [...new Set([...s.expanded, ...indices])],
+      }))()
 
     const card = (i: number) => {
       const q = set.questions[i]!
@@ -728,7 +778,7 @@ export const register: Register = (on, options) => {
                 value={a.other}
                 rows={q.options.length ? 2 : 3}
                 submitLabel="✓"
-                onInput={v => void edit(i, x => ({ ...x, other: v }))}
+                onInput={v => typed(i, 'other', v)}
                 onSubmit={v => void edit(i, x => ({ ...x, other: v }), v.trim() !== '')}
               />
               {/* Free-text questions have the Answer box already: no Notes there. */}
@@ -738,7 +788,7 @@ export const register: Register = (on, options) => {
                 placeholder={a.clarify ? 'What is unclear? (optional)' : 'Extra context, sent with your answer (optional)'}
                 value={a.notes}
                 rows={2}
-                onInput={v => void edit(i, x => ({ ...x, notes: v }))}
+                onInput={v => typed(i, 'notes', v)}
                 onSubmit={v => void edit(i, x => ({ ...x, notes: v }))}
               />}
             </Box>
@@ -768,9 +818,7 @@ export const register: Register = (on, options) => {
           {!isSent && pendingRecs > 0 && (
             <Button
               key="accept-recs"
-              onPress={() =>
-                update($, panel, s => {
-                  if (!s) return s
+              onPress={saveThen(s => {
                   const filled: PanelSet = {
                     ...s,
                     answers: s.questions.map((qq, k) => {
@@ -781,23 +829,18 @@ export const register: Register = (on, options) => {
                   return filled.collapseAnswered
                     ? { ...filled, expanded: filled.expanded.filter(k => !isAnswered(filled.answers[k])) }
                     : filled
-                })
-              }
+                })}
             >
               {`★ Accept recommendations (${pendingRecs})`}
             </Button>
           )}
           <Button
             key="collapse-answered"
-            onPress={() =>
-              update($, panel, s => {
-                if (!s) return s
-                const turningOn = !s.collapseAnswered
-                return turningOn
-                  ? { ...s, collapseAnswered: true, expanded: s.expanded.filter(k => !isAnswered(s.answers[k])) }
-                  : { ...s, collapseAnswered: false }
-              })
-            }
+            onPress={saveThen(s =>
+              s.collapseAnswered
+                ? { ...s, collapseAnswered: false }
+                : { ...s, collapseAnswered: true, expanded: s.expanded.filter(k => !isAnswered(s.answers[k])) },
+            )}
           >
             <Text color={set.collapseAnswered ? 'success' : 'subtle'} bold={set.collapseAnswered === true}>
               {set.collapseAnswered ? '☑' : '☐'}
@@ -806,13 +849,19 @@ export const register: Register = (on, options) => {
           </Button>
           <Button
             key="toggle-all"
-            onPress={() =>
-              update($, panel, s => (s ? { ...s, expanded: allOpen ? [] : s.questions.map((_, i) => i) } : s))
-            }
+            onPress={saveThen(s => ({ ...s, expanded: allOpen ? [] : s.questions.map((_, i) => i) }))}
           >
             {allOpen ? 'Collapse all' : 'Expand all'}
           </Button>
-          <Button key="clear" dimColor onPress={() => void update($, panel, () => null)}>
+          <Button
+            key="clear"
+            dimColor
+            onPress={async () => {
+              draftTimer?.cancel()
+              await update($, drafts, () => ({}))
+              await update($, panel, () => null)
+            }}
+          >
             Clear
           </Button>
         </Box>
