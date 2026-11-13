@@ -1,0 +1,9 @@
+{
+  "name": "question-panel",
+  "version": "0.1.0",
+  "description": "Docked panel that collects every question Claude asks, lets you answer them at your own pace, and sends all answers in one message.",
+  "types": "./types/index.d.ts",
+  "license": "MIT",
+  "author": { "name": "treadingwell" },
+  "repository": "https://github.com/treadingwell/claude-code-desktop-question-panel"
+}

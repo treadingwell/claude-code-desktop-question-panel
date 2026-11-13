@@ -1,0 +1,6 @@
+{
+  "name": "claude-code-desktop-question-panel",
+  "owner": { "name": "treadingwell" },
+  "description": "Question Panel: answer Claude's questions at your own pace in a panel beside the chat.",
+  "plugins": [{ "name": "question-panel", "source": "./" }]
+}
