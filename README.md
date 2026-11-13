@@ -123,6 +123,18 @@ To use it in terminal sessions too, set **Where the Question Panel runs** to `ev
 | `surfaces`: Where the Question Panel runs | `desktop`, `everywhere` | `desktop` |
 | `redirectBuiltin`: Send Claude's built-in questions to the panel | on, off (`/questions on`, `/questions off`) | on |
 
+## Configuration the mod changes
+
+The mod changes one setting, and only when you run a command that asks for it:
+
+- `/questions off` sets the mod's own setting `question-panel.redirectBuiltin` to `false`, and `/questions on` sets it to `true`. This is the same setting you can change with `/config`, stored by Claude Code under `pluginConfigs.question-panel.options.redirectBuiltin` in your user settings.
+
+It changes no other setting and sets no environment variables.
+
+## What the mod reads
+
+The mod reads only its own two settings (`surfaces` and `redirectBuiltin`, as Claude Code passes them to it) and the question set it keeps in the session's state. It asks for no keys, tokens, or other secrets, and reads nothing else from your machine: no files, environment variables, or other programs' output.
+
 ## Notes
 
 - Built on Claude Code's plugin hooks API, which is in early access and may change between releases.
