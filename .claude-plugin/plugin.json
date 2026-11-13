@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "description": "Docked panel that collects every question Claude asks, lets you answer them at your own pace, and sends all answers in one message.",
   "types": "./types/index.d.ts",
+  "userConfig": {
+    "surfaces": {
+      "type": "string",
+      "title": "Where the Question Panel runs",
+      "description": "\"desktop\" (default): only in the Claude desktop app; terminal sessions keep the built-in question prompt. \"everywhere\": also in terminal sessions.",
+      "default": "desktop",
+      "options": ["desktop", "everywhere"]
+    }
+  },
   "license": "MIT",
   "author": { "name": "treadingwell" },
   "repository": "https://github.com/treadingwell/claude-code-desktop-question-panel"

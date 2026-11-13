@@ -66,10 +66,24 @@ If you ever find Claude not using the panel, add a line like "Ask me questions w
 | `/questions on` | Sends the built-in question prompt to the panel again. |
 | `/questions clear` | Empties the panel. |
 
+## Settings
+
+By default the panel runs only in the Claude desktop app. In a terminal session it stays out of the way: no panel, band, tool or commands, and Claude's built-in question prompt works as usual.
+
+To use it in terminal sessions too, set **Where the Question Panel runs** to `everywhere`. In a terminal session, run `/config` and change it there, or add this to `~/.claude/settings.json`:
+
+```json
+{
+  "pluginConfigs": {
+    "question-panel": { "options": { "surfaces": "everywhere" } }
+  }
+}
+```
+
 ## Notes
 
 - Built on Claude Code's plugin hooks API, which is in early access and may change between releases.
-- The panel is designed for the Claude Code desktop app and also works in the terminal, with simpler drawing there (no circle badges).
+- The panel is designed for the Claude desktop app. With `everywhere` set it also works in the terminal, with simpler drawing there (no circle badges).
 
 ## Development
 

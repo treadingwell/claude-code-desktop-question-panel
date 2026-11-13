@@ -34,12 +34,18 @@ const TEN = [
 const submitted: string[] = []
 /** Pane ids the mod opened. */
 const opened: string[] = []
+/** Tools the mod registered. */
+const registered: string[] = []
 
 function engine(on: any, sent: string[], intercept?: boolean) {
   submitted.length = 0
   opened.length = 0
+  registered.length = 0
   on('command.register', (_: unknown, e: any) => ({ value: { command: e.name } }))
-  on('tool.register', () => ({ value: {} }))
+  on('tool.register', (_: unknown, e: any) => {
+    registered.push(e.name)
+    return { value: {} }
+  })
   on('ui.open', (_: unknown, e: any) => {
     opened.push(e.id)
     return { value: { isPlaced: true } }
@@ -58,7 +64,8 @@ function engine(on: any, sent: string[], intercept?: boolean) {
 }
 
 for (const surface of ['desktop', 'terminal'] as const) {
-  test(`10 questions: answer some, keep state, send one formatted message (${surface})`, async ($, on) => {
+  // A terminal session needs surfaces = everywhere (desktop-only by default).
+  test(`10 questions: answer some, keep state, send one formatted message (${surface})`, { options: { surfaces: 'everywhere' } } as any, async ($: any, on: any) => {
     const sent: string[] = []
     engine(on, sent)
     await $.session.start({ cwd: '/', surface, isInteractive: true })
@@ -466,6 +473,24 @@ test('plans: Plan 1 and Plan 2 each number their questions from 1', async ($, on
     ['Answers (1/6):', '## Plan 1', '1 1-1: skipped', '2 1-2: skipped', '3 1-3: skipped', '## Plan 2', '1 2-1: skipped', '2 2-2: b', '3 2-3: skipped'].join('\n'),
   )
   await ui.unmount()
+})
+
+test('desktop only by default: a terminal session keeps the built-in dialog', async ($, on) => {
+  const sent: string[] = []
+  engine(on, sent)
+  // Stands for the built-in dialog: the panel must pass the call down to it.
+  on('tool.call', { tool: 'AskUserQuestion' }, () => ({ result: { answers: { q: 'dialog' } } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(registered).toHaveLength(0)
+  const ran: any = await $.tool.call({ tool: 'AskUserQuestion', questions: [{ question: 'A?', header: 'H', multiSelect: false, options: [{ label: 'x', description: '' }, { label: 'y', description: '' }] }] } as any)
+  expect(ran.result.answers.q).toBe('dialog')
+})
+
+test('surfaces = everywhere: the panel runs in a terminal session too', { options: { surfaces: 'everywhere' } } as any, async ($: any, on: any) => {
+  const sent: string[] = []
+  engine(on, sent)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(registered).toContain('ask_questions')
 })
 
 test('AskUserQuestion is answered by the panel and calls accumulate', async ($, on) => {

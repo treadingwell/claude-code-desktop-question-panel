@@ -361,8 +361,17 @@ async function receive($: EngineInterface, qs: PanelQuestion[], id: string) {
   return after?.questions.length ?? qs.length
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  // Desktop-only by default: a terminal session keeps the built-in question
+  // prompt and gets no panel, band, tool or commands. Setting "surfaces" to
+  // "everywhere" turns the panel on in terminals too. session.start runs again
+  // on every reload, so this is always set before the other hooks matter.
+  const everywhere = (options as { surfaces?: unknown }).surfaces === 'everywhere'
+  let active = true
+
   on('session.start', async ($, e, next) => {
+    active = everywhere || e.surface !== 'terminal'
+    if (!active) return next(e)
     await $.command.register({
       name: 'questions',
       description: 'Open the Question Panel. "/questions off" lets AskUserQuestion use its own dialog again; "/questions on" routes it to the panel.',
@@ -399,7 +408,7 @@ export const register: Register = on => {
     // Only Claude's own questions come here. A plugin asking through the dialog
     // ($.ui.ask: a permission check, a confirmation) waits on the person's
     // answer there, so it keeps the dialog.
-    if (next.origin.plugin !== 'engine') return next(e)
+    if (!active || next.origin.plugin !== 'engine') return next(e)
     if ((await $.store.get(INTERCEPT_KEY)) === false) return next(e)
     const qs = normalizeQuestions(e.questions)
     if (qs.length === 0) return next(e)
@@ -457,6 +466,7 @@ export const register: Register = on => {
   // Under each question call's row in the chat: a way back to the panel, in
   // case it was closed. Only for calls the panel took.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    if (!active) return next(e)
     const p = e.props
     const isOurs =
       p.tool === TOOL_FULL ||
@@ -479,7 +489,7 @@ export const register: Register = on => {
   // Always-visible band above the prompt while questions wait: progress and
   // the send action, wherever the panel is scrolled.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey) return next(e)
+    if (!active || e.props.hasSurvey) return next(e)
     const set = await read($, panel)
     if (!set || set.sentAt !== undefined || set.questions.length === 0) return next(e)
     const total = set.questions.length
@@ -499,7 +509,8 @@ export const register: Register = on => {
     )
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (!active) return next(e)
     const els = $.ui.resolve(e)
     const { Box, Text, Button, Input, Markdown } = els
     // Desktop draws the number as a circle badge; the terminal has no Svg.
@@ -533,8 +544,8 @@ export const register: Register = on => {
         if (!s || s.id !== set.id || !s.questions[i]) return s
         const answers = [...s.answers]
         answers[i] = fn(answers[i] ?? emptyAnswer(), s.questions[i])
-        const next = { ...s, answers }
-        return decided ? settle(next, i) : next
+        const changed = { ...s, answers }
+        return decided ? settle(changed, i) : changed
       })
 
     const toggleOpen = (i: number) =>
