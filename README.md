@@ -9,7 +9,7 @@ A Claude Code mod that collects every question Claude asks you into a panel dock
 - **Claude's recommendations, inline.** Recommended options sit together in a highlighted bubble with Claude's reason. Pick them one at a time, or use **★ Accept recommendations** to fill in every unanswered question.
 - **❓ Please clarify.** One click asks Claude to explain a question and ask it again.
 - **Progress you can see.** Numbered badges turn green when a question is answered (amber when you asked for clarification), and the panel shows "7/12 answered".
-- **Collapse answered.** An optional toggle closes each question as you answer it and opens the next one, so you scroll less.
+- **Collapse answered.** On by default: each question closes as you answer it and the next one opens, so you scroll less. Untick it in the top bar to keep questions open; that choice carries over to later sets of questions.
 - **Easy to get back to.** Each time Claude asks, the chat shows an **Open Question Panel** button under the question call, so you can reopen the panel if you closed it.
 - **Submit from anywhere.** A band above the prompt box shows your progress with a **Submit answers** button. When every question is answered, a second **Submit answers** button appears under the last question. **Put answers in prompt** in the panel's top bar fills the prompt box instead, so you can review before sending.
 

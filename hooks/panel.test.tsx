@@ -76,6 +76,8 @@ for (const surface of ['desktop', 'terminal'] as const) {
     expect(String(ran.result)).toContain('10 question(s)')
 
     const ui = await $.ui.mount({ ...PANE, surface })
+    // Written for "collapse answered" off (it is on by default).
+    await ui.press({ key: 'collapse-answered' })
     expect((await ui.find({ type: 'Text', text: /0\/10 answered/ }))?.text).toBeDefined()
     // Every question is listed.
     for (let i = 0; i < 10; i++) expect(await ui.find({ key: `q${i}` })).toBeDefined()
@@ -189,6 +191,8 @@ test('recommendations: shown, accepted per question or all at once, marked in th
   } as any)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // Written for "collapse answered" off (it is on by default).
+  await ui.press({ key: 'collapse-answered' })
   // Collapsed rows show the recommendation.
   expect((await ui.find({ type: 'Text', text: /★ Recommended: Yes$/ }))?.text).toBeDefined()
   expect((await ui.find({ type: 'Text', text: /★ Recommended: Web, iOS/ }))?.text).toBeDefined()
@@ -254,6 +258,8 @@ test('notes alone are not an answer (sent with the skipped question); please cla
     ],
   } as any)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // Written for "collapse answered" off (it is on by default).
+  await ui.press({ key: 'collapse-answered' })
 
   // Q1: please clarify, with what's unclear in notes (typed, never submitted).
   await ui.press({ key: 'q0-clarify' })
@@ -311,7 +317,10 @@ test('collapse answered: a decided question closes and the next unanswered opens
   await $.tool.call({ tool: TOOL, questions: TEN } as any)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  // Off by default: picking keeps Q1 open.
+  // On by default; turned off, picking keeps Q1 open.
+  expect(JSON.stringify(await ui.find({ key: 'collapse-answered' }))).toContain('☑')
+  await ui.press({ key: 'collapse-answered' })
+  expect(JSON.stringify(await ui.find({ key: 'collapse-answered' }))).toContain('☐')
   await ui.press({ key: 'q0-o0' })
   expect(await ui.find({ key: 'q0-notes' })).toBeDefined()
 
@@ -413,6 +422,8 @@ test('Submit answers appears under the last question only once all are answered'
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: TOOL, questions: [{ question: 'A?', options: [{ label: 'x' }, { label: 'y' }] }, { question: 'B?' }] } as any)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // Written for "collapse answered" off (it is on by default).
+  await ui.press({ key: 'collapse-answered' })
   await ui.press({ key: 'q0-o0' })
   expect(await ui.find({ key: 'submit-bottom' })).toBeUndefined()
   await ui.press({ key: 'q1' })
@@ -584,5 +595,21 @@ test('multi-select: Done closes the question and opens the next unanswered one',
   expect(await ui.find({ key: 'q1-o0' })).toBeUndefined()
   expect((await ui.find({ type: 'Text', text: /→ Postgres, SQLite/ }))?.text).toBeDefined()
   expect(await ui.find({ key: 'q2-other' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('collapse answered is on by default: a pick closes the question and opens the next', async ($, on) => {
+  const sent: string[] = []
+  engine(on, sent)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, questions: TEN } as any)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'q0-o0' })
+  expect(await ui.find({ key: 'q0-notes' })).toBeUndefined()
+  expect(await ui.find({ key: 'q1-notes' })).toBeDefined()
+  // Turned off, it stays off for the next set of questions.
+  await ui.press({ key: 'collapse-answered' })
+  await $.tool.call({ tool: TOOL, questions: TEN.slice(0, 2), replace: true } as any)
+  expect(JSON.stringify(await ui.find({ key: 'collapse-answered' }))).toContain('☐')
   await ui.unmount()
 })

@@ -216,13 +216,18 @@ export function formatAnswers(set: PanelSet): string {
   return lines.join('\n')
 }
 
+/** "Collapse answered" is on unless the person turned it off (unset = on). */
+export function collapsing(s: PanelSet): boolean {
+  return s.collapseAnswered !== false
+}
+
 /**
  * With "collapse answered" on (or `force`, for a multi-select's Done button):
  * closes question i once it is answered and opens the next unanswered one
  * (after i, else from the top).
  */
 export function settle(s: PanelSet, i: number, force = false): PanelSet {
-  if ((!s.collapseAnswered && !force) || !isAnswered(s.answers[i])) return s
+  if ((!collapsing(s) && !force) || !isAnswered(s.answers[i])) return s
   const n = s.questions.length
   let next: number | undefined
   for (let k = 1; k < n; k++) {
@@ -254,8 +259,8 @@ export function addQuestions(set: PanelSet | null, qs: PanelQuestion[], id: stri
     questions: qs,
     answers: qs.map(emptyAnswer),
     expanded: qs.length ? [0] : [],
-    // a new set keeps the previous set's toggle
-    ...(set?.collapseAnswered ? { collapseAnswered: true } : {}),
+    // a new set keeps the previous set's toggle (on unless turned off)
+    ...(set?.collapseAnswered === false ? { collapseAnswered: false } : {}),
   }
 }
 
@@ -836,7 +841,7 @@ export const register: Register = (on, options) => {
                       return hasChoice(cur) || cur.clarify ? cur : applyRecommendation(qq, cur)
                     }),
                   }
-                  return filled.collapseAnswered
+                  return collapsing(filled)
                     ? { ...filled, expanded: filled.expanded.filter(k => !isAnswered(filled.answers[k])) }
                     : filled
                 })}
@@ -847,13 +852,13 @@ export const register: Register = (on, options) => {
           <Button
             key="collapse-answered"
             onPress={saveThen(s =>
-              s.collapseAnswered
+              collapsing(s)
                 ? { ...s, collapseAnswered: false }
                 : { ...s, collapseAnswered: true, expanded: s.expanded.filter(k => !isAnswered(s.answers[k])) },
             )}
           >
-            <Text color={set.collapseAnswered ? 'success' : 'subtle'} bold={set.collapseAnswered === true}>
-              {set.collapseAnswered ? '☑' : '☐'}
+            <Text color={collapsing(set) ? 'success' : 'subtle'} bold={collapsing(set)}>
+              {collapsing(set) ? '☑' : '☐'}
             </Text>
             {' Collapse answered'}
           </Button>

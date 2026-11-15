@@ -23,7 +23,7 @@ export type PanelSet = {
   questions: PanelQuestion[]
   answers: PanelAnswer[]
   expanded: number[]
-  /** Collapse a question once it is answered, and open the next unanswered one. */
+  /** Collapse a question once it is answered, and open the next unanswered one. Unset means on. */
   collapseAnswered?: boolean
   sentAt?: number
 }
