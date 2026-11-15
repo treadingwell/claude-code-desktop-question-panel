@@ -563,3 +563,26 @@ test('AskUserQuestion is answered by the panel and calls accumulate', async ($, 
   expect((await ui.find({ type: 'Text', text: /0\/10 answered/ }))?.text).toBeDefined()
   await ui.unmount()
 })
+
+test('multi-select: Done closes the question and opens the next unanswered one', async ($, on) => {
+  const sent: string[] = []
+  engine(on, sent)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, questions: TEN } as any)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  if (!(await ui.find({ key: 'q1-o0' }))) await ui.press({ key: 'q1' })
+  // No Done until something is picked.
+  expect(await ui.find({ key: 'q1-done' })).toBeUndefined()
+  await ui.press({ key: 'q1-o0' })
+  await ui.press({ key: 'q1-o2' })
+  expect((await ui.find({ key: 'q1-done' }))?.text).toBe('✓ Done (2 picked)')
+  // Still open: picking alone never closes a multi-select.
+  expect(await ui.find({ key: 'q1-o1' })).toBeDefined()
+
+  await ui.press({ key: 'q1-done' })
+  expect(await ui.find({ key: 'q1-o0' })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /→ Postgres, SQLite/ }))?.text).toBeDefined()
+  expect(await ui.find({ key: 'q2-other' })).toBeDefined()
+  await ui.unmount()
+})

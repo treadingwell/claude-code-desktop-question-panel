@@ -217,11 +217,12 @@ export function formatAnswers(set: PanelSet): string {
 }
 
 /**
- * With "collapse answered" on: closes question i once it is answered and
- * opens the next unanswered one (after i, else from the top).
+ * With "collapse answered" on (or `force`, for a multi-select's Done button):
+ * closes question i once it is answered and opens the next unanswered one
+ * (after i, else from the top).
  */
-export function settle(s: PanelSet, i: number): PanelSet {
-  if (!s.collapseAnswered || !isAnswered(s.answers[i])) return s
+export function settle(s: PanelSet, i: number, force = false): PanelSet {
+  if ((!s.collapseAnswered && !force) || !isAnswered(s.answers[i])) return s
   const n = s.questions.length
   let next: number | undefined
   for (let k = 1; k < n; k++) {
@@ -744,6 +745,15 @@ export const register: Register = (on, options) => {
                     }
                     return rows
                   })()}
+                  {/* Picking in a multi-select never closes the question, so it
+                      gets its own Done: close it and open the next unanswered. */}
+                  {q.multiSelect && a.selected.length > 0 ? (
+                    <Box paddingLeft={e.surface === 'terminal' ? 2 : 1}>
+                      <Button key={`q${i}-done`} variant="primary" onPress={() => void saveThen(s => settle(s, i, true))()}>
+                        <Text bold color="success">{`✓ Done (${a.selected.length} picked)`}</Text>
+                      </Button>
+                    </Box>
+                  ) : null}
                 </Box>
               )}
               {q.options.length === 0 && q.recommendation ? (
