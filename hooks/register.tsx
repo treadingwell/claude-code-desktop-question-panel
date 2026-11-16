@@ -511,6 +511,7 @@ const TOOL_DESCRIPTION = [
   'Put ALL your questions in ONE call: there is no limit on how many.',
   'Each question may have options (single-select by default, multiSelect: true for several); the panel always adds a free-text "Other" box and a notes box, so never add an "Other" option yourself.',
   'Questions with no options get a free-text answer box (no notes box).',
+  'Question text and option descriptions are drawn as Markdown: write context or inline choices such as "A) … B) …" on separate lines (the panel also splits them), and name files by path (absolute, or relative to the project folder) or as Markdown links: the panel makes them clickable.',
   'Give every question a short `header` (1-3 words): it labels the answer in the reply.',
   'Always set `session`: a short name (3-6 words) for what this session is working on, such as "Question Panel: all-sessions view". The user may have several sessions asking questions, and this name tells them which one is asking.',
   'Whenever you have a view, give a recommendation: set recommended: true on the option(s) you recommend and put a one-line reason in `recommendation` (for an open-ended question, put your suggested answer there). The user can accept recommendations with one click.',
@@ -604,6 +605,135 @@ export function escapeMarkdown(s: string): string {
   return s.replace(/[\\`*_{}[\]()<>#+\-.!|~]/g, c => `\\${c}`).replace(/[\r\n\t]+/g, ' ')
 }
 
+// ---------- question text: lists on their own lines, file paths as links ----------
+
+/** A `file:` URL for an absolute path (`C:\a b\c.ts` or `/a/b.ts`). */
+export function fileUrl(abs: string): string {
+  const p = abs.replace(/\\/g, '/')
+  const enc = encodeURI(p).replace(/[#?()]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
+  return /^[A-Za-z]:\//.test(p) ? `file:///${enc}` : `file://${enc}`
+}
+
+/** Joins a relative path onto a folder, resolving `.` and `..`. */
+export function joinPath(dir: string, rel: string): string {
+  const parts = dir.replace(/\\/g, '/').replace(/\/+$/, '').split('/')
+  for (const seg of rel.replace(/\\/g, '/').split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') {
+      if (parts.length > 1) parts.pop()
+    } else parts.push(seg)
+  }
+  return parts.join('/')
+}
+
+const LINE_SUFFIX = /(:\d+(?::\d+)?)$/
+const WIN_ABS = /^[A-Za-z]:[\\/]/
+const SEG = String.raw`[\w.@+-]+`
+/** A path written bare in prose: absolute (Windows or Unix, two parts or more) or relative with an extension. */
+const BARE_PATH = new RegExp(
+  String.raw`(^|[\s(“"'])(` +
+    String.raw`[A-Za-z]:[\\/](?:${SEG}[\\/])*${SEG}` +
+    String.raw`|/(?:${SEG}/)+${SEG}` +
+    String.raw`|(?:\.{1,2}[\\/])?(?:${SEG}[\\/])+${SEG}\.[A-Za-z0-9]{1,8}` +
+    String.raw`)(:\d+(?::\d+)?)?(?=$|[\s)”"',;:!?]|\.(?:\s|$))`,
+  'g',
+)
+
+/**
+ * The absolute path a written path names, or undefined when it is not a
+ * path: absolute as written, or relative to the session's folder.
+ */
+export function resolvePath(raw: string, cwd: string): string | undefined {
+  const p = raw.trim()
+  if (!p || /\s{2}|[<>|*?"\n]/.test(p) || /^[a-z]+:\/\//i.test(p)) return undefined
+  if (WIN_ABS.test(p)) return p
+  if (p.startsWith('/')) return p.split('/').filter(Boolean).length >= 2 ? p : undefined
+  if (!cwd || !/[\\/]/.test(p) || /\s/.test(p)) return undefined
+  if (!/\.[A-Za-z0-9]{1,8}$/.test(p) && !/[\\/]$/.test(p)) return undefined
+  return joinPath(cwd, p)
+}
+
+const escLabel = (s: string) => s.replace(/[[\]\\]/g, c => `\\${c}`)
+
+/** Turns file paths in one stretch of prose (no code or links in it) into links. */
+function linkBare(s: string, cwd: string): string {
+  return s.replace(BARE_PATH, (all, lead: string, path: string, line: string | undefined) => {
+    const abs = resolvePath(path, cwd)
+    return abs ? `${lead}[${escLabel(path + (line ?? ''))}](${fileUrl(abs)})` : all
+  })
+}
+
+/** Turns file paths into `file:` links, leaving code blocks, links and URLs alone. */
+export function linkPaths(text: string, cwd: string): string {
+  // Code spans, existing links and URLs are kept as written; a code span that
+  // is a whole path becomes a link with a code label.
+  const TOKEN = /(```[\s\S]*?```|`[^`\n]+`|!?\[[^\]\n]*\]\([^)\n]*\)|<[a-z]+:[^>\s]+>|\b[a-z]+:\/\/[^\s)]+)/gi
+  let out = ''
+  let last = 0
+  for (const m of text.matchAll(TOKEN)) {
+    out += linkBare(text.slice(last, m.index), cwd)
+    const tok = m[0]
+    if (/^`[^`]/.test(tok)) {
+      const inner = tok.slice(1, -1)
+      const line = inner.match(LINE_SUFFIX)?.[1] ?? ''
+      const abs = resolvePath(line ? inner.slice(0, -line.length) : inner, cwd)
+      out += abs ? `[${tok}](${fileUrl(abs)})` : tok
+    } else out += tok
+    last = (m.index ?? 0) + tok.length
+  }
+  return out + linkBare(text.slice(last), cwd)
+}
+
+/**
+ * Puts inline choices written in one run, such as "A) … B) … C) …" or
+ * "1. … 2. …", each on its own line. Only a run that starts at A, a or 1 and
+ * goes on to B, b or 2 counts, so "plan B) " or "version 2. " alone stay put.
+ */
+export function splitInlineLists(text: string): string {
+  const styles: { re: RegExp; first: string; second: string }[] = [
+    { re: /(^|\s)(\(?)([A-H])\)\s/g, first: 'A', second: 'B' },
+    { re: /(^|\s)(\(?)([a-h])\)\s/g, first: 'a', second: 'b' },
+    { re: /(^|\s)(\(?)([1-9]\d?)\)\s/g, first: '1', second: '2' },
+    { re: /(^|\s)()([1-9]\d?)\.\s/g, first: '1', second: '2' },
+  ]
+  return text
+    .split('\n')
+    .map(line => {
+      for (const st of styles) {
+        const labels = [...line.matchAll(st.re)].map(m => m[3])
+        const i = labels.indexOf(st.first)
+        if (i < 0 || labels[i + 1] !== st.second) continue
+        return line.replace(st.re, (all: string, lead: string, paren: string, label: string, off: number) =>
+          off === 0 && lead === '' ? all : `\n${paren}${label}${all.slice(lead.length + paren.length + label.length)}`,
+        )
+      }
+      return line
+    })
+    .join('\n')
+}
+
+/**
+ * A question's text as Markdown: inline choices on their own lines, a blank
+ * line between lines so each stands apart, file paths as clickable links, and
+ * the opening paragraph bold while the question is open.
+ */
+export function questionMarkdown(text: string, cwd: string, bold = false): string {
+  const src = text.replace(/\r\n?/g, '\n').trim()
+  const fenced = src.includes('```')
+  const paras = fenced
+    ? [src]
+    : splitInlineLists(src)
+        .split('\n')
+        .map(l => l.trim())
+        .filter(Boolean)
+  const linked = paras.map(p => linkPaths(p, cwd))
+  const head = linked[0]
+  if (bold && !fenced && head !== undefined && !/[*_]{2}/.test(head) && !/^(#|>|[-*+] |\d+[.)] )/.test(head)) {
+    linked[0] = `**${head}**`
+  }
+  return linked.join('\n\n')
+}
+
 /**
  * Puts the formatted answers in the normal prompt box; the person presses
  * Enter to send them, and the panel clears once they are received.
@@ -677,8 +807,9 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     active = everywhere || e.surface !== 'terminal'
     if (!active) return next(e)
+    // The session's folder: relative file paths in questions link from here.
+    sync.cwd = e.cwd
     if (allSessions) {
-      sync.cwd = e.cwd
       syncTimer?.cancel()
       // A tick never overlaps the one before it.
       const tick = async () => {
@@ -918,6 +1049,8 @@ export const register: Register = (on, options) => {
       /** Absent while another session is running (its questions are its own). */
       clear?: () => Promise<void>
       other?: OtherSession
+      /** The asking session's folder, for file paths written relative to it. */
+      cwd: string
     }
 
     const setView = (t: Target) => {
@@ -1014,7 +1147,7 @@ export const register: Register = (on, options) => {
               {q.header ? (
                 <Text bold color="suggestion" wrap="wrap">{q.header}</Text>
               ) : null}
-              <Text bold={open} wrap="wrap">{q.question}</Text>
+              <Markdown key={`${k}q${i}-text`} text={questionMarkdown(q.question, t.cwd, open)} />
             </Box>
             {/* An outlined, unfilled toggle: a plain button in a gray-stroked box,
                 the arrow in the same gray as the stroke and the open badges. */}
@@ -1055,7 +1188,7 @@ export const register: Register = (on, options) => {
                           </Button>
                           {o.description ? (
                             <Box paddingLeft={2}>
-                              <Text dimColor wrap="wrap">{o.description}</Text>
+                              <Markdown key={`${k}q${i}-od${j}`} dimColor text={questionMarkdown(o.description, t.cwd)} />
                             </Box>
                           ) : null}
                         </Box>
@@ -1264,6 +1397,7 @@ export const register: Register = (on, options) => {
     // ----- the targets -----
     const localTarget = (s: PanelSet): Target => ({
       k: '',
+      cwd: sync.cwd,
       set: s,
       update: fn => update($, panel, cur => (cur ? fn(cur) : cur)),
       submit: () => submitAnswers($),
@@ -1276,6 +1410,7 @@ export const register: Register = (on, options) => {
     })
     const otherTarget = (o: OtherSession, n: number): Target => ({
       k: `s${n}-`,
+      cwd: o.cwd,
       set: o.set,
       other: o,
       update: fn =>

@@ -771,3 +771,35 @@ test('all sessions off (default): no tabs and no shared files', async ($, on) =>
   expect(await ui.find({ key: 'tab-all' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('inline choices go on their own lines and file paths become links', async ($, on) => {
+  const sent: string[] = []
+  engine(on, sent)
+  await $.session.start({ cwd: 'D:/work/panel', surface: 'desktop', isInteractive: true })
+  await $.tool.call({
+    tool: TOOL,
+    questions: [
+      {
+        question: 'Which layout? A) tabs on top B) a sidebar C) both. See hooks/register.tsx:42 and `D:\\CODE PROJECTS\\notes.md`.',
+        header: 'Layout',
+        options: [{ label: 'A', description: 'Like /usr/share/doc/readme.txt' }, { label: 'B' }],
+      },
+      { question: 'Keep plan B) as is? Use /questions off, version 2. Then go.', header: 'Plain' },
+    ],
+  } as any)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const md = (await ui.find({ type: 'Markdown', text: /Which layout/ }))!.text as string
+  expect(md).toBe(
+    [
+      '**Which layout?**',
+      'A) tabs on top',
+      'B) a sidebar',
+      'C) both. See [hooks/register.tsx:42](file:///D:/work/panel/hooks/register.tsx) and [`D:\\CODE PROJECTS\\notes.md`](file:///D:/CODE%20PROJECTS/notes.md).',
+    ].join('\n\n'),
+  )
+  expect((await ui.find({ type: 'Markdown', text: /Like/ }))!.text).toBe('Like [/usr/share/doc/readme.txt](file:///usr/share/doc/readme.txt)')
+  await ui.press({ key: 'q0' })
+  const plain = (await ui.find({ type: 'Markdown', text: /Keep plan/ }))!.text
+  expect(plain).toBe('Keep plan B) as is? Use /questions off, version 2. Then go.')
+  await ui.unmount()
+})
