@@ -678,6 +678,10 @@ export function linkPaths(text: string, cwd: string): string {
       const line = inner.match(LINE_SUFFIX)?.[1] ?? ''
       const abs = resolvePath(line ? inner.slice(0, -line.length) : inner, cwd)
       out += abs ? `[${tok}](${fileUrl(abs)})` : tok
+    } else if (/^(https?|file):\/\//i.test(tok)) {
+      // A bare web address: a link, leaving closing punctuation outside it.
+      const url = tok.replace(/[.,;:!?'"”’]+$/, '')
+      out += `[${escLabel(url)}](${url.replace(/[()]/g, c => (c === '(' ? '%28' : '%29'))})${tok.slice(url.length)}`
     } else out += tok
     last = (m.index ?? 0) + tok.length
   }

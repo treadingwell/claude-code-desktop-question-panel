@@ -785,6 +785,7 @@ test('inline choices go on their own lines and file paths become links', async (
         options: [{ label: 'A', description: 'Like /usr/share/doc/readme.txt' }, { label: 'B' }],
       },
       { question: 'Keep plan B) as is? Use /questions off, version 2. Then go.', header: 'Plain' },
+      { question: 'Read https://example.com/docs?a=1, then [the guide](https://example.com/guide).', header: 'Web' },
     ],
   } as any)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
@@ -801,5 +802,9 @@ test('inline choices go on their own lines and file paths become links', async (
   await ui.press({ key: 'q0' })
   const plain = (await ui.find({ type: 'Markdown', text: /Keep plan/ }))!.text
   expect(plain).toBe('Keep plan B) as is? Use /questions off, version 2. Then go.')
+  await ui.press({ key: 'q1' })
+  expect((await ui.find({ type: 'Markdown', text: /Read/ }))!.text).toBe(
+    'Read [https://example.com/docs?a=1](https://example.com/docs?a=1), then [the guide](https://example.com/guide).',
+  )
   await ui.unmount()
 })
