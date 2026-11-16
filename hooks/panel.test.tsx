@@ -613,3 +613,161 @@ test('collapse answered is on by default: a pick closes the question and opens t
   expect(JSON.stringify(await ui.find({ key: 'collapse-answered' }))).toContain('☐')
   await ui.unmount()
 })
+
+// ---------- all sessions ----------
+
+const DIR = '/home/u/.claude/question-panel/sessions'
+
+/** An in-memory folder standing for the shared files, and this session's id. */
+function sharedFs(on: any, id: string) {
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  let tick = 1
+  // The engine hands hooks the path in the platform's form (C:\home\...): compare them as /home/...
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
+  const put = (path: string, text: string) => files.set(norm(path), { text, mtimeMs: tick++ })
+  mock.env(on, { USERPROFILE: '/home/u' })
+  on('session.id', () => ({ value: id }))
+  on('fs.write', (_: unknown, e: any) => {
+    put(e.path, e.text)
+    return { value: undefined }
+  })
+  on('fs.read', (_: unknown, e: any) => {
+    const f = files.get(norm(e.path))
+    if (!f) throw new Error(`ENOENT: ${e.path}`)
+    return { value: f.text }
+  })
+  on('fs.list', (_: unknown, e: any) => {
+    const prefix = `${norm(e.path)}/`
+    const value = [...files.entries()]
+      .filter(([p]) => p.startsWith(prefix) && !p.slice(prefix.length).includes('/'))
+      .map(([p, f]) => ({ name: p.slice(prefix.length), kind: 'file', size: f.text.length, mtimeMs: f.mtimeMs, isLink: false }))
+    return { value }
+  })
+  return { files, put }
+}
+
+const otherFile = (id: string, label: string, updatedAt: number, extra: object = {}) =>
+  JSON.stringify({
+    v: 1,
+    id,
+    label,
+    cwd: 'D:/work/billing',
+    updatedAt,
+    setId: `set-${id}`,
+    questions: [
+      { question: 'Which queue?', header: 'Queue', options: [{ label: 'SQS' }, { label: 'Kafka' }], multiSelect: false },
+      { question: 'Retry count?', header: 'Retries', options: [], multiSelect: false },
+    ],
+    ...extra,
+  })
+
+const ALL = { options: { allSessions: true } } as any
+// The test runner has timers; the mod's types do not declare them.
+declare const setTimeout: (fn: (v?: unknown) => void, ms: number) => unknown
+
+/** Moves the clock one sync period on and lets that tick finish. */
+const syncTick = async () => {
+  await clock.advance(3000)
+  for (let i = 0; i < 30; i++) await new Promise(r => setTimeout(r, 1))
+}
+
+test('all sessions: this session shares its questions; another session\'s are answered here and sent to it', ALL, async ($: any, on: any) => {
+  const sent: string[] = []
+  engine(on, sent)
+  const fs = sharedFs(on, 'sess-A')
+  fs.put(`${DIR}/sess-B.json`, otherFile('sess-B', 'Billing refactor', Date.now()))
+  await $.session.start({ cwd: 'D:/work/panel', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, questions: TEN.slice(0, 2), session: 'Panel work' } as any)
+  await syncTick()
+
+  // This session's file: its questions under the name Claude gave.
+  const own = JSON.parse(fs.files.get(`${DIR}/sess-A.json`)!.text)
+  expect(own.label).toBe('Panel work')
+  expect(own.questions).toHaveLength(2)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // This session's tab is as before, with the tabs on top.
+  expect(await ui.find({ key: 'q0' })).toBeDefined()
+  expect((await ui.find({ key: 'tab-all' }))?.text).toBe('All sessions (2)')
+  await ui.press({ key: 'tab-all' })
+  expect((await ui.find({ type: 'Markdown', text: /Billing refactor/ }))).toBeDefined()
+  expect((await ui.find({ type: 'Markdown', text: /Panel work/ }))).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /billing · running/ }))?.text).toBeDefined()
+  // A running session's questions cannot be cleared from here.
+  expect(await ui.find({ key: 's0-clear' })).toBeUndefined()
+
+  await ui.press({ key: 's0-q0-o1' })
+  await ui.press({ key: 's0-submit' })
+  const inbox = [...fs.files.entries()].filter(([p]) => p.startsWith(`${DIR}/inbox/sess-B--`))
+  expect(inbox).toHaveLength(1)
+  expect(JSON.parse(inbox[0]![1].text).text).toBe('Answers (1/2):\n1 Queue: Kafka\n2 Retries: skipped')
+  expect((await ui.find({ type: 'Text', text: /Sent\. It goes away/ }))?.text).toBeDefined()
+  // Nothing went into this session's own conversation.
+  expect(submitted).toHaveLength(0)
+
+  // Session B clears its file once it has the answers: it goes from the list.
+  fs.put(`${DIR}/sess-B.json`, '')
+  await syncTick()
+  expect(await ui.find({ type: 'Markdown', text: /Billing refactor/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('all sessions: answers waiting in this session\'s inbox are submitted as the person\'s prompt', ALL, async ($: any, on: any) => {
+  const sent: string[] = []
+  engine(on, sent)
+  const fs = sharedFs(on, 'sess-A')
+  await $.session.start({ cwd: 'D:/work/panel', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, questions: TEN.slice(0, 1), session: 'Panel work' } as any)
+  await syncTick()
+  expect(fs.files.get(`${DIR}/sess-A.json`)!.text).not.toBe('')
+
+  fs.put(`${DIR}/inbox/sess-A--1.json`, JSON.stringify({ text: 'Answers (1/1):\n1 Language: Go' }))
+  fs.put(`${DIR}/inbox/sess-Z--1.json`, JSON.stringify({ text: 'Answers (1/1):\n1 Other: not mine' }))
+  await syncTick()
+  expect(submitted).toEqual(['Answers (1/1):\n1 Language: Go'])
+  expect(fs.files.get(`${DIR}/inbox/sess-A--1.json`)!.text).toBe('')
+  expect(fs.files.get(`${DIR}/inbox/sess-Z--1.json`)!.text).not.toBe('')
+  // Received: this session's questions clear, and so does its shared file.
+  await syncTick()
+  expect(fs.files.get(`${DIR}/sess-A.json`)!.text).toBe('')
+  // Not sent twice.
+  await syncTick()
+  expect(submitted).toHaveLength(1)
+})
+
+test('all sessions: a resumed session gets back its open questions; an ended one can be cleared', ALL, async ($: any, on: any) => {
+  const sent: string[] = []
+  engine(on, sent)
+  const fs = sharedFs(on, 'sess-A')
+  fs.put(`${DIR}/sess-A.json`, otherFile('sess-A', 'Panel work', Date.now() - 600000, { endedAt: Date.now() - 600000 }))
+  fs.put(`${DIR}/sess-C.json`, otherFile('sess-C', 'Old docs pass', Date.now() - 600000, { endedAt: Date.now() - 600000 }))
+  await $.session.start({ cwd: 'D:/work/panel', surface: 'desktop', isInteractive: true })
+  await syncTick()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ key: 'q1' })).toBeDefined()
+  expect(JSON.parse(fs.files.get(`${DIR}/sess-A.json`)!.text).endedAt).toBeUndefined()
+
+  await ui.press({ key: 'tab-all' })
+  expect((await ui.find({ type: 'Text', text: /not running: answers wait/ }))?.text).toBeDefined()
+  await ui.press({ key: 's0-q0-o0' })
+  await ui.press({ key: 's0-submit' })
+  expect((await ui.find({ type: 'Text', text: /sent when that session is opened again/ }))?.text).toBeDefined()
+  await ui.press({ key: 's0-clear' })
+  expect(fs.files.get(`${DIR}/sess-C.json`)!.text).toBe('')
+  expect(await ui.find({ type: 'Markdown', text: /Old docs pass/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('all sessions off (default): no tabs and no shared files', async ($, on) => {
+  const sent: string[] = []
+  engine(on, sent)
+  const fs = sharedFs(on, 'sess-A')
+  await $.session.start({ cwd: 'D:/work/panel', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, questions: TEN.slice(0, 2), session: 'Panel work' } as any)
+  await syncTick()
+  expect(fs.files.size).toBe(0)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ key: 'tab-all' })).toBeUndefined()
+  await ui.unmount()
+})

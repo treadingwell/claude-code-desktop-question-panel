@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { PanelAnswer, PanelDrafts, PanelOption, PanelQuestion, PanelSet } from '../types'
+import type { OtherSession, OtherSessions, PanelAnswer, PanelDrafts, PanelOption, PanelQuestion, PanelSet, PanelView } from '../types'
 
 const PANE = 'question-panel'
 const TITLE = 'Questions'
@@ -27,6 +27,235 @@ const drafts = atom({ plugin: 'question-panel', key: 'drafts' } as const, {} as 
 /** How long typing must pause before the typed text is saved into the set. */
 const DRAFT_SAVE_MS = 700
 
+// ---------- all sessions (setting allSessions) ----------
+// Each session writes its open questions to <dir>/<session id>.json and
+// reads the others' files every SYNC_MS. Answers for another session go to
+// <dir>/inbox/<its id>--<n>.json; that session submits them as the person's
+// prompt and empties the file ($.fs has no delete, so an empty file is a gone one).
+const others = atom({ plugin: 'question-panel', key: 'others' } as const, {} as OtherSessions, { shape: 'others-1' })
+const view = atom({ plugin: 'question-panel', key: 'view' } as const, 'this' as PanelView, { shape: 'view-1' })
+const SYNC_MS = 3000
+/** A running session rewrites its file at least this often. */
+const HEARTBEAT_MS = 15000
+/** A file not rewritten for this long belongs to a session that is not running. */
+const STALE_MS = 45000
+
+/** The shape of a session's file in the shared folder. */
+export type SessionFile = {
+  v: 1
+  id: string
+  label: string
+  cwd: string
+  updatedAt: number
+  endedAt?: number
+  setId: string
+  questions: PanelQuestion[]
+}
+
+/** The label a session goes by: the name Claude gave it, else folder · short id. */
+export function sessionLabel(given: string | undefined, cwd: string, id: string): string {
+  if (given?.trim()) return given.trim()
+  const folder = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || cwd
+  return `${folder} · ${id.slice(0, 8)}`
+}
+
+/** This session's file content: its open questions, or '' when it has none. */
+export function sessionFileText(set: PanelSet | null, id: string, cwd: string, now: number, endedAt?: number): string {
+  if (!set || set.sentAt !== undefined || set.questions.length === 0) return ''
+  const file: SessionFile = {
+    v: 1,
+    id,
+    label: sessionLabel(set.sessionLabel, cwd, id),
+    cwd,
+    updatedAt: now,
+    ...(endedAt !== undefined ? { endedAt } : {}),
+    setId: set.id,
+    questions: set.questions,
+  }
+  return JSON.stringify(file)
+}
+
+/** Reads a session file's text; undefined for an empty or unreadable one. */
+export function parseSessionFile(text: string): SessionFile | undefined {
+  if (!text.trim()) return undefined
+  try {
+    const f = JSON.parse(text) as SessionFile
+    if (f?.v !== 1 || typeof f.id !== 'string' || !Array.isArray(f.questions) || typeof f.setId !== 'string') return undefined
+    return f
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Another session as this panel keeps it: its questions from the file, the
+ * answers given here kept while the same set stands; a new set starts over.
+ */
+export function mergeOther(cur: OtherSession | undefined, f: SessionFile): OtherSession {
+  const sameSet = cur?.set.id === f.setId
+  const set: PanelSet = sameSet && cur
+    ? {
+        ...cur.set,
+        questions: f.questions,
+        answers: f.questions.map((_, i) => cur.set.answers[i] ?? emptyAnswer()),
+      }
+    : { id: f.setId, questions: f.questions, answers: f.questions.map(emptyAnswer), expanded: f.questions.length ? [0] : [] }
+  return {
+    id: f.id,
+    label: f.label,
+    cwd: f.cwd,
+    updatedAt: f.updatedAt,
+    ...(f.endedAt !== undefined ? { endedAt: f.endedAt } : {}),
+    set,
+  }
+}
+
+/** Whether another session is running, judged by its file's age. */
+export const isRunning = (o: OtherSession, now: number) => o.endedAt === undefined && now - o.updatedAt < STALE_MS
+
+/** Where the shared files live: <Claude config dir>/question-panel/sessions. */
+async function sharedDir($: EngineInterface): Promise<string | undefined> {
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? undefined
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? undefined
+  const base = config || (home ? `${home.replace(/[\\/]+$/, '')}/.claude` : undefined)
+  return base ? `${base.replace(/\\/g, '/')}/question-panel/sessions` : undefined
+}
+
+/** What one session's sync loop remembers between ticks. */
+type SyncState = {
+  dir?: string
+  /** This session's id as of the last tick (it changes on /clear). */
+  id?: string
+  cwd: string
+  lastText: string
+  lastWriteAt: number
+  /** mtime of each other session's file as last read. */
+  seen: Record<string, number>
+  /** Inbox files taken but not yet submitted, so two ticks never send one twice. */
+  taking: Set<string>
+}
+
+/**
+ * One sync tick: writes this session's file when it changed (or for the
+ * heartbeat), reads the other sessions' files that changed, and submits any
+ * answers waiting in this session's inbox.
+ */
+async function syncTick($: EngineInterface, st: SyncState, deliver: boolean) {
+  st.dir ??= await sharedDir($)
+  const dir = st.dir
+  if (!dir) return
+  const now = Date.now()
+  const id = await $.session.id()
+  if (st.id === undefined) {
+    // First tick (a start or a resume): questions this session left open,
+    // still in its file, come back into the panel.
+    const f = parseSessionFile(await $.fs.read(`${dir}/${id}.json`).catch(() => ''))
+    const local = await read($, panel)
+    if (f && (!local || local.questions.length === 0 || local.sentAt !== undefined)) {
+      await update($, panel, s => ({
+        ...addQuestions(null, f.questions, f.setId),
+        ...(s?.collapseAnswered === false ? { collapseAnswered: false } : {}),
+        ...(f.label ? { sessionLabel: f.label } : {}),
+      }))
+    }
+  } else if (st.id !== id) {
+    // /clear: the conversation goes on under a new id; the old file goes.
+    await $.fs.write(`${dir}/${st.id}.json`, '').catch(() => undefined)
+    st.lastText = ''
+  }
+  st.id = id
+  const own = sessionFileText(await read($, panel), id, st.cwd, now)
+  // Compare without the timestamp, which changes every time.
+  const sig = own.replace(/"updatedAt":\d+,/, '')
+  if (sig !== st.lastText || (own && now - st.lastWriteAt >= HEARTBEAT_MS)) {
+    if (own || st.lastText) await $.fs.write(`${dir}/${id}.json`, own)
+    st.lastText = sig
+    st.lastWriteAt = now
+  }
+
+  const entries = await $.fs.list(dir).catch(() => [])
+  const present = new Set<string>()
+  const changed: SessionFile[] = []
+  for (const ent of entries) {
+    if (ent.kind !== 'file' || !ent.name.endsWith('.json')) continue
+    const otherId = ent.name.slice(0, -5)
+    if (otherId === id || ent.size === 0) continue
+    present.add(otherId)
+    if (st.seen[otherId] === ent.mtimeMs) continue
+    const f = parseSessionFile(await $.fs.read(`${dir}/${ent.name}`).catch(() => ''))
+    st.seen[otherId] = ent.mtimeMs
+    if (f) changed.push(f)
+    else present.delete(otherId)
+  }
+  for (const k of Object.keys(st.seen)) if (!present.has(k)) delete st.seen[k]
+  const cur = await read($, others)
+  const gone = Object.keys(cur).filter(k => !present.has(k))
+  if (changed.length || gone.length) {
+    await update($, others, all => {
+      const merged: OtherSessions = { ...all }
+      for (const k of gone) delete merged[k]
+      for (const f of changed) merged[f.id] = mergeOther(merged[f.id], f)
+      return merged
+    })
+  }
+
+  if (!deliver) return
+  const inbox = await $.fs.list(`${dir}/inbox`).catch(() => [])
+  for (const ent of inbox) {
+    if (ent.kind !== 'file' || ent.size === 0 || !ent.name.startsWith(`${id}--`) || st.taking.has(ent.name)) continue
+    const path = `${dir}/inbox/${ent.name}`
+    st.taking.add(ent.name)
+    try {
+      const text = await $.fs.read(path).catch(() => '')
+      let msg: { text?: unknown; setId?: unknown } | undefined
+      try {
+        msg = JSON.parse(text) as { text?: unknown; setId?: unknown }
+      } catch {
+        msg = undefined
+      }
+      if (typeof msg?.text !== 'string' || !msg.text.trim()) {
+        await $.fs.write(path, '')
+        continue
+      }
+      // Take it first (empty the file), so another copy of the mod never sends it too.
+      await $.fs.write(path, '')
+      const result = await $.prompt.submit({ text: msg.text, asUser: true })
+      if ('drop' in result && result.drop) {
+        await $.fs.write(path, text) // not taken: try again next tick
+        continue
+      }
+      // A prompt the mod submits skips the mod's own prompt.submit hook, so the
+      // answered questions are cleared here (the set they answer, or any open
+      // set when the sender did not say which).
+      const setId = typeof msg.setId === 'string' ? msg.setId : undefined
+      await update($, panel, s =>
+        s && s.sentAt === undefined && (setId === undefined || s.id === setId)
+          ? { ...s, questions: [], answers: [], expanded: [], sentAt: Date.now() }
+          : s,
+      )
+      $.ui.toast('Answers from another session were sent to Claude')
+    } finally {
+      st.taking.delete(ent.name)
+    }
+  }
+}
+
+/** Sends the answers given here for another session to that session's inbox. */
+async function submitOther($: EngineInterface, otherId: string, dir: string | undefined) {
+  await commitDrafts($)
+  const all = await read($, others)
+  const o = all[otherId]
+  if (!dir || !o || o.set.sentAt !== undefined || o.set.questions.length === 0) return
+  const text = formatAnswers(o.set)
+  await $.fs.write(`${dir}/inbox/${otherId}--${Date.now()}.json`, JSON.stringify({ text, setId: o.set.id }))
+  await update($, others, cur => (cur[otherId] ? { ...cur, [otherId]: { ...cur[otherId]!, set: { ...cur[otherId]!.set, sentAt: Date.now() } } } : cur))
+  $.ui.toast(
+    isRunning(o, Date.now())
+      ? `Answers sent to "${o.label}"`
+      : `Answers saved for "${o.label}": they are sent when that session is opened again`,
+  )
+}
+
 export const draftKey = (setId: string, i: number, field: 'other' | 'notes') => `${setId}|${i}|${field}`
 
 /** The set with the drafts typed into it applied to its answers. */
@@ -49,6 +278,16 @@ async function commitDrafts($: EngineInterface) {
   const d = await read($, drafts)
   if (Object.keys(d).length === 0) return
   await update($, panel, s => (s ? applyDrafts(s, d) : s))
+  // Drafts typed into another session's questions (all-sessions view).
+  const ids = new Set(Object.keys(d).map(k => k.split('|')[0]))
+  const all = await read($, others)
+  if (Object.values(all).some(o => ids.has(o.set.id))) {
+    await update($, others, cur => {
+      const merged: OtherSessions = {}
+      for (const [k, o] of Object.entries(cur)) merged[k] = ids.has(o.set.id) ? { ...o, set: applyDrafts(o.set, d) } : o
+      return merged
+    })
+  }
   await update($, drafts, cur => {
     const rest = { ...cur }
     for (const key of Object.keys(d)) if (rest[key] === d[key]) delete rest[key]
@@ -273,6 +512,7 @@ const TOOL_DESCRIPTION = [
   'Each question may have options (single-select by default, multiSelect: true for several); the panel always adds a free-text "Other" box and a notes box, so never add an "Other" option yourself.',
   'Questions with no options get a free-text answer box (no notes box).',
   'Give every question a short `header` (1-3 words): it labels the answer in the reply.',
+  'Always set `session`: a short name (3-6 words) for what this session is working on, such as "Question Panel: all-sessions view". The user may have several sessions asking questions, and this name tells them which one is asking.',
   'Whenever you have a view, give a recommendation: set recommended: true on the option(s) you recommend and put a one-line reason in `recommendation` (for an open-ended question, put your suggested answer there). The user can accept recommendations with one click.',
   'Use `group` for sections: for more than about 6 questions, and whenever your questions come in sets such as "Plan 1" and "Plan 2". Numbering restarts at 1 in each group, so Plan 1 questions 1-3 and Plan 2 questions 1-3 keep their numbers.',
   "After calling this, end your turn immediately without further work. The user's answers arrive as their next message in this compact form: a first line `Answers (answered/total):`, a `## Group` line before each group's answers, then one line per question: `<number> <header>: <answer>`, where the answer is the picked option(s), `other: <text>`, the free-text answer, `skipped`, or `CLARIFY`; `. note: <text>` follows when the user added a note. Match answers to your questions by group and number.",
@@ -325,6 +565,10 @@ const TOOL_SCHEMA = {
 ;(TOOL_SCHEMA.properties as Record<string, unknown>).replace = {
   type: 'boolean',
   description: 'Start a fresh set, discarding unsent questions already in the panel. Only when the user asked for that.',
+}
+;(TOOL_SCHEMA.properties as Record<string, unknown>).session = {
+  type: 'string',
+  description: 'A short name (3-6 words) for what this session is working on, so the user can tell which session is asking.',
 }
 
 const handoffText = (added: number, total: number) =>
@@ -401,8 +645,12 @@ async function submitAnswers($: EngineInterface) {
 }
 
 /** Puts questions in the panel and opens it; returns the open set's size. */
-async function receive($: EngineInterface, qs: PanelQuestion[], id: string) {
-  const after = await update($, panel, set => addQuestions(set, qs, id))
+async function receive($: EngineInterface, qs: PanelQuestion[], id: string, label?: string) {
+  const after = await update($, panel, set => {
+    const added = addQuestions(set, qs, id)
+    const name = label?.trim() || set?.sessionLabel
+    return name ? { ...added, sessionLabel: name } : added
+  })
   void $.ui.open({ id: PANE, title: TITLE })
   $.ui.toast(`${qs.length} question(s) added to the Question Panel`)
   return after?.questions.length ?? qs.length
@@ -417,13 +665,36 @@ export const register: Register = (on, options) => {
   // Settings, not anything read from the machine: whether Claude's built-in
   // question prompt (AskUserQuestion) goes to the panel. A change reloads the mod.
   const redirectBuiltin = (options as { redirectBuiltin?: unknown }).redirectBuiltin !== false
+  // Setting: show every session's questions, in an "All sessions" tab.
+  const allSessions = (options as { allSessions?: unknown }).allSessions === true
   let active = true
   // The pending "save typed text" timer, restarted on each key.
   let draftTimer: Timer | undefined
+  let syncTimer: Timer | undefined
+  const sync: SyncState = { cwd: '', lastText: '', lastWriteAt: 0, seen: {}, taking: new Set() }
+  let syncing = false
 
   on('session.start', async ($, e, next) => {
     active = everywhere || e.surface !== 'terminal'
     if (!active) return next(e)
+    if (allSessions) {
+      sync.cwd = e.cwd
+      syncTimer?.cancel()
+      // A tick never overlaps the one before it.
+      const tick = async () => {
+        if (syncing) return
+        syncing = true
+        try {
+          await syncTick($, sync, true)
+        } catch {
+          // a missed tick is retried by the next one
+        } finally {
+          syncing = false
+        }
+      }
+      syncTimer = $.clock.every(SYNC_MS, () => tick())
+      void tick()
+    }
     await $.command.register({
       name: 'questions',
       description: 'Open the Question Panel. "/questions off" lets AskUserQuestion use its own dialog again; "/questions on" routes it to the panel.',
@@ -445,13 +716,13 @@ export const register: Register = (on, options) => {
 
   // The mod's own tool: any number of questions.
   on('tool.call', { tool: TOOL_FULL }, async ($, e) => {
-    const input = e as { questions?: unknown; replace?: unknown }
+    const input = e as { questions?: unknown; replace?: unknown; session?: unknown }
     const qs = normalizeQuestions(input.questions)
     if (qs.length === 0) return { deny: 'No questions given: pass questions: [{ question, options?, multiSelect? }, ...].' }
     if (input.replace === true) {
       await update($, panel, s => (s ? { ...s, sentAt: s.sentAt ?? Date.now() } : s))
     }
-    const total = await receive($, qs, e.tool_use_id)
+    const total = await receive($, qs, e.tool_use_id, typeof input.session === 'string' ? input.session : undefined)
     return { result: handoffText(qs.length, total) }
   })
 
@@ -504,6 +775,17 @@ export const register: Register = (on, options) => {
     return { text: 'Asked Claude to send its questions to the Question Panel.' }
   })
 
+  // Mark this session's file ended, so other panels show it as not running
+  // (its questions stay, and answers sent to it wait in its inbox).
+  on('session.end', async ($, e, next) => {
+    if (allSessions && active && sync.dir) {
+      syncTimer?.cancel()
+      const text = sessionFileText(await read($, panel), e.sessionId, sync.cwd, Date.now(), Date.now())
+      await $.fs.write(`${sync.dir}/${e.sessionId}.json`, text).catch(() => undefined)
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   // Once the answers message has gone in, clear the panel. Waits for next(e)
   // so a dropped or refused prompt leaves the answers where they were.
   on('prompt.submit', async ($, e, next) => {
@@ -544,10 +826,29 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (!active || e.props.hasSurvey) return next(e)
     const set = await read($, panel)
-    if (!set || set.sentAt !== undefined || set.questions.length === 0) return next(e)
+    const elsewhere = allSessions
+      ? Object.values(await read($, others)).filter(o => o.set.questions.length > 0 && o.set.sentAt === undefined).length
+      : 0
+    const mine = !!set && set.sentAt === undefined && set.questions.length > 0
+    if (!mine && elsewhere === 0) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const showAll = async () => {
+      await update($, view, () => 'all')
+      await $.ui.open({ id: PANE, title: TITLE })
+    }
+    if (!mine || !set) {
+      return (
+        <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+          <Text bold>Questions</Text>
+          <Text color="subtle">{`waiting in ${elsewhere} other session${elsewhere === 1 ? '' : 's'}`}</Text>
+          <Button key="band-all" dimColor onPress={() => void showAll()}>
+            Show
+          </Button>
+        </Box>
+      )
+    }
     const total = set.questions.length
     const done = set.questions.filter((_, i) => isAnswered(set.answers[i])).length
-    const { Box, Text, Button } = $.ui.resolve(e)
     return (
       <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
         <Text bold>Questions</Text>
@@ -558,6 +859,11 @@ export const register: Register = (on, options) => {
         <Button key="band-open" dimColor onPress={() => void $.ui.open({ id: PANE, title: TITLE })}>
           Show panel
         </Button>
+        {elsewhere > 0 && (
+          <Button key="band-all" plain dimColor onPress={() => void showAll()}>
+            {`+${elsewhere} other session${elsewhere === 1 ? '' : 's'}`}
+          </Button>
+        )}
       </Box>
     )
   })
@@ -568,19 +874,55 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button, Input, Markdown } = els
     // Desktop draws the number as a circle badge; the terminal has no Svg.
     const Svg = e.surface !== 'terminal' && 'Svg' in els && els.Svg ? els.Svg : undefined
-    const set = await read($, panel)
+    const local = await read($, panel)
+    const tab: PanelView = allSessions ? await read($, view) : 'this'
+    const otherList = allSessions
+      ? Object.values(await read($, others))
+          .filter(o => o.set.questions.length > 0)
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+      : []
+    const now = Date.now()
+    const localOpen = !!local && local.questions.length > 0 && local.sentAt === undefined
+    const waitingElsewhere = otherList.filter(o => o.set.sentAt === undefined).length
 
-    if (!set || set.questions.length === 0) {
-      return (
-        <Box flexDirection="column" gap={1}>
-          <Text bold>No questions yet</Text>
-          <Text dimColor>
-            When Claude asks questions they collect here. Type /ask-me to have Claude send all its questions about the current task.
-          </Text>
-        </Box>
-      )
+    // The two tabs, only with the all-sessions setting on.
+    const tabs = allSessions ? (
+      <Box key="tabs" flexDirection="row" gap={1} flexWrap="wrap">
+        <Button key="tab-this" variant={tab === 'this' ? 'primary' : 'secondary'} onPress={() => void update($, view, () => 'this')}>
+          This session
+        </Button>
+        <Button key="tab-all" variant={tab === 'all' ? 'primary' : 'secondary'} onPress={() => void update($, view, () => 'all')}>
+          {`All sessions${waitingElsewhere + (localOpen ? 1 : 0) > 0 ? ` (${waitingElsewhere + (localOpen ? 1 : 0)})` : ''}`}
+        </Button>
+      </Box>
+    ) : null
+
+    const empty = (
+      <Box flexDirection="column" gap={1}>
+        <Text bold>No questions yet</Text>
+        <Text dimColor>
+          When Claude asks questions they collect here. Type /ask-me to have Claude send all its questions about the current task.
+        </Text>
+      </Box>
+    )
+
+    /** One set of questions and how to change it: this session's, or another's. */
+    type Target = {
+      /** Prefix for every key, so two sets never share one ('' for this session). */
+      k: string
+      set: PanelSet
+      update: (fn: (s: PanelSet) => PanelSet | null) => Promise<unknown>
+      submit: () => Promise<void>
+      /** Only this session's answers can go into this session's prompt box. */
+      fill?: () => Promise<void>
+      /** Absent while another session is running (its questions are its own). */
+      clear?: () => Promise<void>
+      other?: OtherSession
     }
 
+    const setView = (t: Target) => {
+    const set = t.set
+    const k = t.k
     const total = set.questions.length
     const done = set.questions.filter((_, i) => isAnswered(set.answers[i])).length
     const isSent = set.sentAt !== undefined
@@ -604,8 +946,8 @@ export const register: Register = (on, options) => {
 
     const edit = async (i: number, fn: (a: PanelAnswer, q: PanelQuestion) => PanelAnswer, decided = false) => {
       await commitDrafts($)
-      return update($, panel, s => {
-        if (!s || s.id !== set.id || !s.questions[i]) return s
+      return t.update(s => {
+        if (s.id !== set.id || !s.questions[i]) return s
         const answers = [...s.answers]
         answers[i] = fn(answers[i] ?? emptyAnswer(), s.questions[i])
         const changed = { ...s, answers }
@@ -616,7 +958,7 @@ export const register: Register = (on, options) => {
     // Any other action that redraws the panel saves the typed text first.
     const saveThen = (fn: (s: PanelSet) => PanelSet | null) => async () => {
       await commitDrafts($)
-      await update($, panel, s => (s ? fn(s) : s))
+      await t.update(fn)
     }
 
     const toggleOpen = (i: number) =>
@@ -632,7 +974,7 @@ export const register: Register = (on, options) => {
 
     // Puts the answers in the normal prompt box; the person presses Enter to
     // send them as their own message. The set is marked sent on that submit.
-    const send = () => fillAnswers($)
+    const send = () => void t.fill?.()
 
     const toggleGroup = (indices: number[], isOpen: boolean) =>
       saveThen(s => ({
@@ -650,7 +992,7 @@ export const register: Register = (on, options) => {
       const num = questionNumber(set.questions, i)
       const followsRec = rec !== undefined && sameAnswer(applyRecommendation(q, a), a)
       return (
-        <Box key={`card-${i}`} flexDirection="column" borderStyle="round" paddingX={1}>
+        <Box key={`${k}card-${i}`} flexDirection="column" borderStyle="round" paddingX={1}>
           <Box flexDirection="row" gap={1} alignItems="flex-start">
             {Svg ? (
               <Svg
@@ -677,7 +1019,7 @@ export const register: Register = (on, options) => {
             {/* An outlined, unfilled toggle: a plain button in a gray-stroked box,
                 the arrow in the same gray as the stroke and the open badges. */}
             <Box borderStyle="round" borderColor={MUTED} paddingX={1}>
-              <Button key={`q${i}`} plain onPress={() => toggleOpen(i)}>
+              <Button key={`${k}q${i}`} plain onPress={() => toggleOpen(i)}>
                 <Text bold color={MUTED}>{open ? '▼' : '▶'}</Text>
               </Button>
             </Box>
@@ -707,8 +1049,8 @@ export const register: Register = (on, options) => {
                       const picked = a.selected.includes(o.label)
                       const glyph = q.multiSelect ? (picked ? '☑' : '☐') : picked ? '◉' : '○'
                       return (
-                        <Box key={`q${i}-ob${j}`} flexDirection="column">
-                          <Button key={`q${i}-o${j}`} variant={picked ? 'primary' : 'secondary'} onPress={() => pick(i, o.label)}>
+                        <Box key={`${k}q${i}-ob${j}`} flexDirection="column">
+                          <Button key={`${k}q${i}-o${j}`} variant={picked ? 'primary' : 'secondary'} onPress={() => pick(i, o.label)}>
                             <Text bold={picked} color={picked ? 'success' : undefined}>{`${glyph} ${o.label}`}</Text>
                           </Button>
                           {o.description ? (
@@ -732,14 +1074,14 @@ export const register: Register = (on, options) => {
                         // Terminal: the border is a whole column, so 1 + 1. Desktop:
                         // the border is a hairline, so the padding alone (1).
                         rows.push(
-                          <Box key={`q${i}-pad${j}`} paddingLeft={e.surface === 'terminal' ? 2 : 1}>
+                          <Box key={`${k}q${i}-pad${j}`} paddingLeft={e.surface === 'terminal' ? 2 : 1}>
                             {optionRow(o, j)}
                           </Box>,
                         )
                         continue
                       }
                       rows.push(
-                        <Box key={`q${i}-rec`} flexDirection="column" gap={1} borderStyle="round" borderColor="claude" paddingX={1}>
+                        <Box key={`${k}q${i}-rec`} flexDirection="column" gap={1} borderStyle="round" borderColor="claude" paddingX={1}>
                           <Text color="claude" wrap="wrap">
                             <Text bold color="claude">★ Recommended</Text>
                             {q.recommendation ? `: ${q.recommendation}` : ''}
@@ -754,7 +1096,7 @@ export const register: Register = (on, options) => {
                       gets its own Done: close it and open the next unanswered. */}
                   {q.multiSelect && a.selected.length > 0 ? (
                     <Box paddingLeft={e.surface === 'terminal' ? 2 : 1}>
-                      <Button key={`q${i}-done`} variant="primary" onPress={() => void saveThen(s => settle(s, i, true))()}>
+                      <Button key={`${k}q${i}-done`} variant="primary" onPress={() => void saveThen(s => settle(s, i, true))()}>
                         <Text bold color="success">{`✓ Done (${a.selected.length} picked)`}</Text>
                       </Button>
                     </Box>
@@ -767,7 +1109,7 @@ export const register: Register = (on, options) => {
                     <Text bold color="claude">★ Suggested</Text>
                   </Box>
                   <Button
-                    key={`q${i}-suggest`}
+                    key={`${k}q${i}-suggest`}
                     variant={followsRec ? 'primary' : 'secondary'}
                     onPress={() => void edit(i, (x, qq) => applyRecommendation(qq, x), true)}
                   >
@@ -777,7 +1119,7 @@ export const register: Register = (on, options) => {
               ) : null}
               <Box flexDirection="row" gap={1} flexWrap="wrap" paddingLeft={e.surface === 'terminal' ? 2 : 1}>
                 <Button
-                  key={`q${i}-clarify`}
+                  key={`${k}q${i}-clarify`}
                   variant={a.clarify ? 'primary' : 'secondary'}
                   onPress={() => void edit(i, x => ({ ...x, clarify: !x.clarify }), !a.clarify)}
                 >
@@ -787,7 +1129,7 @@ export const register: Register = (on, options) => {
                 </Button>
               </Box>
               <Input
-                key={`q${i}-other`}
+                key={`${k}q${i}-other`}
                 label={q.options.length ? 'Other' : 'Answer'}
                 placeholder={q.options.length ? 'Your own answer (optional)' : 'Type your answer'}
                 value={a.other}
@@ -798,7 +1140,7 @@ export const register: Register = (on, options) => {
               />
               {/* Free-text questions have the Answer box already: no Notes there. */}
               {q.options.length > 0 && <Input
-                key={`q${i}-notes`}
+                key={`${k}q${i}-notes`}
                 label="Notes"
                 placeholder={a.clarify ? 'What is unclear? (optional)' : 'Extra context, sent with your answer (optional)'}
                 value={a.notes}
@@ -819,20 +1161,31 @@ export const register: Register = (on, options) => {
             {`${done}/${total} answered${isSent ? ' · sent' : ''}`}
           </Text>
           <Text dimColor wrap="wrap">
-            {isSent
-              ? 'Sent. New questions from Claude will start a fresh set.'
-              : 'Click ▶ to open a question. "Put answers in prompt" fills the prompt box; press Enter there to send.'}
+            {t.other
+              ? isSent
+                ? isRunning(t.other, now)
+                  ? 'Sent. It goes away once that session has received the answers.'
+                  : 'Saved. The answers are sent when that session is opened again.'
+                : 'Your answers go to that session as your message when you submit.'
+              : isSent
+                ? 'Sent. New questions from Claude will start a fresh set.'
+                : 'Click ▶ to open a question. "Put answers in prompt" fills the prompt box; press Enter there to send.'}
           </Text>
         </Box>
         <Box flexDirection="row" gap={1} flexWrap="wrap">
-          {!isSent && (
-            <Button key="send" variant="primary" onPress={send}>
+          {!isSent && t.fill && (
+            <Button key={`${k}send`} variant="primary" onPress={send}>
               {`Put answers in prompt (${done}/${total})`}
+            </Button>
+          )}
+          {!isSent && t.other && (
+            <Button key={`${k}submit`} variant="primary" onPress={() => void t.submit()}>
+              {`Submit to this session (${done}/${total})`}
             </Button>
           )}
           {!isSent && pendingRecs > 0 && (
             <Button
-              key="accept-recs"
+              key={`${k}accept-recs`}
               onPress={saveThen(s => {
                   const filled: PanelSet = {
                     ...s,
@@ -850,7 +1203,7 @@ export const register: Register = (on, options) => {
             </Button>
           )}
           <Button
-            key="collapse-answered"
+            key={`${k}collapse-answered`}
             onPress={saveThen(s =>
               collapsing(s)
                 ? { ...s, collapseAnswered: false }
@@ -863,22 +1216,16 @@ export const register: Register = (on, options) => {
             {' Collapse answered'}
           </Button>
           <Button
-            key="toggle-all"
+            key={`${k}toggle-all`}
             onPress={saveThen(s => ({ ...s, expanded: allOpen ? [] : s.questions.map((_, i) => i) }))}
           >
             {allOpen ? 'Collapse all' : 'Expand all'}
           </Button>
-          <Button
-            key="clear"
-            dimColor
-            onPress={async () => {
-              draftTimer?.cancel()
-              await update($, drafts, () => ({}))
-              await update($, panel, () => null)
-            }}
-          >
-            Clear
-          </Button>
+          {t.clear && (
+            <Button key={`${k}clear`} dimColor onPress={() => void t.clear?.()}>
+              Clear
+            </Button>
+          )}
         </Box>
 
         {groupQuestions(set.questions).map((g, gi) => {
@@ -886,14 +1233,14 @@ export const register: Register = (on, options) => {
           const gDone = g.indices.filter(i => isAnswered(set.answers[i])).length
           const gOpen = g.indices.every(i => set.expanded.includes(i))
           return (
-            <Box key={`group-${gi}`} flexDirection="column" gap={1}>
+            <Box key={`${k}group-${gi}`} flexDirection="column" gap={1}>
               <Box flexDirection="row" gap={1} alignItems="center">
                 <Box flexShrink={1}>
                   {/* A heading: drawn larger and bold, as in a reply. */}
                   <Markdown text={`### ${escapeMarkdown(g.name)}`} />
                 </Box>
                 <Text bold color={gDone === g.indices.length ? 'success' : 'subtle'}>{`${gDone}/${g.indices.length}`}</Text>
-                <Button key={`g${gi}`} plain dimColor onPress={() => toggleGroup(g.indices, gOpen)}>
+                <Button key={`${k}g${gi}`} plain dimColor onPress={() => toggleGroup(g.indices, gOpen)}>
                   {gOpen ? '▾' : '▸'}
                 </Button>
               </Box>
@@ -906,9 +1253,102 @@ export const register: Register = (on, options) => {
 
         {/* Only once every question is answered: send from where you finished. */}
         {!isSent && done === total && (
-          <Button key="submit-bottom" variant="primary" onPress={() => void submitAnswers($)}>
-            Submit answers
+          <Button key={`${k}submit-bottom`} variant="primary" onPress={() => void t.submit()}>
+            {t.other ? 'Submit to this session' : 'Submit answers'}
           </Button>
+        )}
+      </Box>
+    )
+    }
+
+    // ----- the targets -----
+    const localTarget = (s: PanelSet): Target => ({
+      k: '',
+      set: s,
+      update: fn => update($, panel, cur => (cur ? fn(cur) : cur)),
+      submit: () => submitAnswers($),
+      fill: () => fillAnswers($),
+      clear: async () => {
+        draftTimer?.cancel()
+        await update($, drafts, () => ({}))
+        await update($, panel, () => null)
+      },
+    })
+    const otherTarget = (o: OtherSession, n: number): Target => ({
+      k: `s${n}-`,
+      set: o.set,
+      other: o,
+      update: fn =>
+        update($, others, all => {
+          const cur = all[o.id]
+          if (!cur) return all
+          const changed = fn(cur.set)
+          return changed ? { ...all, [o.id]: { ...cur, set: changed } } : all
+        }),
+      submit: () => submitOther($, o.id, sync.dir),
+      // Only a session that is not running can be cleared from here: a running
+      // one would write its questions back on its next tick.
+      clear: isRunning(o, now)
+        ? undefined
+        : async () => {
+            if (sync.dir) await $.fs.write(`${sync.dir}/${o.id}.json`, '').catch(() => undefined)
+            await update($, others, all => {
+              const merged = { ...all }
+              delete merged[o.id]
+              return merged
+            })
+          },
+    })
+
+    if (tab === 'this') {
+      if (!local || local.questions.length === 0) {
+        return tabs ? (
+          <Box flexDirection="column" gap={1}>
+            {tabs}
+            {empty}
+          </Box>
+        ) : empty
+      }
+      const body = setView(localTarget(local))
+      return tabs ? (
+        <Box flexDirection="column" gap={1}>
+          {tabs}
+          {body}
+        </Box>
+      ) : body
+    }
+
+    // All sessions: this session's set first, then the others, newest first.
+    const sessionHead = (key: string, title: string, sub: string, color?: string) => (
+      <Box key={key} flexDirection="column">
+        <Markdown text={`## ${escapeMarkdown(title)}`} />
+        <Text dimColor={!color} color={color} wrap="wrap">{sub}</Text>
+      </Box>
+    )
+    const sections = []
+    if (local && local.questions.length > 0) {
+      sections.push(
+        <Box key="sess-this" flexDirection="column" gap={1}>
+          {sessionHead('sess-this-head', local.sessionLabel ?? 'This session', 'This session', 'success')}
+          {setView(localTarget(local))}
+        </Box>,
+      )
+    }
+    otherList.forEach((o, n) => {
+      const running = isRunning(o, now)
+      const folder = o.cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || o.cwd
+      sections.push(
+        <Box key={`sess-${n}`} flexDirection="column" gap={1}>
+          {sessionHead(`sess-${n}-head`, o.label, `${folder} · ${running ? 'running' : 'not running: answers wait until it is opened'}`)}
+          {setView(otherTarget(o, n))}
+        </Box>,
+      )
+    })
+    return (
+      <Box flexDirection="column" gap={1}>
+        {tabs}
+        {sections.length ? sections : (
+          <Text dimColor wrap="wrap">No session has questions waiting.</Text>
         )}
       </Box>
     )

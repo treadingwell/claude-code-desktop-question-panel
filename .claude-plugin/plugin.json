@@ -1,6 +1,6 @@
 {
   "name": "question-panel",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Docked panel that collects every question Claude asks, lets you answer them at your own pace, and sends all answers in one message.",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -16,6 +16,12 @@
       "title": "Send Claude's built-in questions to the panel",
       "description": "On (default): when Claude asks with the built-in question prompt (AskUserQuestion), the questions go to the panel instead. Off: the built-in dialog shows as usual. /questions on and /questions off change this.",
       "default": true
+    },
+    "allSessions": {
+      "type": "boolean",
+      "title": "Show questions from all sessions",
+      "description": "Off (default): the panel shows this session's questions. On: an \"All sessions\" tab lists the open questions of every session (grouped by session, kept after a session closes), and answers given there are sent to the session that asked. Sessions share them through files in <Claude config folder>/question-panel/sessions.",
+      "default": false
     }
   },
   "license": "MIT",

@@ -12,6 +12,7 @@ A Claude Code mod that collects every question Claude asks you into a panel dock
 - **Collapse answered.** On by default: each question closes as you answer it and the next one opens, so you scroll less. Untick it in the top bar to keep questions open; that choice carries over to later sets of questions.
 - **Easy to get back to.** Each time Claude asks, the chat shows an **Open Question Panel** button under the question call, so you can reopen the panel if you closed it.
 - **Submit from anywhere.** A band above the prompt box shows your progress with a **Submit answers** button. When every question is answered, a second **Submit answers** button appears under the last question. **Put answers in prompt** in the panel's top bar fills the prompt box instead, so you can review before sending.
+- **All sessions (optional).** With **Show questions from all sessions** on, an **All sessions** tab lists every session's open questions, grouped by session, and sends your answers to the session that asked, even one you open later. See [All sessions](#all-sessions).
 
 Answers are sent as one compact message. Claude already has its questions in context, so each answer carries only its number and a short label, not the question's text:
 
@@ -90,7 +91,8 @@ What each of the mod's hooks does:
 
 | Hook | What it does |
 | --- | --- |
-| `session.start` | Decides whether the mod runs in this session (desktop app, or everywhere per the setting). If it does, registers the `ask_questions` tool and the `/questions` and `/ask-me` commands. |
+| `session.start` | Decides whether the mod runs in this session (desktop app, or everywhere per the setting). If it does, registers the `ask_questions` tool and the `/questions` and `/ask-me` commands, and with **Show questions from all sessions** on, starts sharing this session's questions (see [All sessions](#all-sessions)). |
+| `session.end` | With **Show questions from all sessions** on: marks this session's shared file as ended, so other panels show it as not running. |
 | `tool.call` on `mcp__question-panel__ask_questions` | The mod's own tool: puts Claude's questions in the panel, opens it, and answers the call with the note above. |
 | `tool.call` on `AskUserQuestion` | Stands in for the built-in tool as described above; otherwise passes the call on unchanged. If anything fails, the built-in dialog opens as usual. |
 | `command.run` on `questions` | Opens the panel; `on` and `off` change the **Send Claude's built-in questions to the panel** setting; `clear` empties the panel. |
@@ -100,7 +102,7 @@ What each of the mod's hooks does:
 | `ui.render` on `AbovePrompt` | Draws the band above the prompt (progress, **Submit answers**, **Show panel**) while questions are waiting; otherwise draws nothing. |
 | `ui.render` on `ToolUse` | Adds an **Open Question Panel** button under the chat row of a question call the panel took; leaves every other row as it is. |
 
-The mod keeps the open question set and your answers in the session's state, so they survive the mod reloading. It reads no files, runs no programs, and makes no network requests.
+The mod keeps the open question set and your answers in the session's state, so they survive the mod reloading. It runs no programs and makes no network requests. It reads and writes files only with **Show questions from all sessions** on, and only in its own folder (see [All sessions](#all-sessions)).
 
 ## Commands
 
@@ -130,6 +132,20 @@ To use it in terminal sessions too, set **Where the Question Panel runs** to `ev
 | --- | --- | --- |
 | `surfaces`: Where the Question Panel runs | `desktop`, `everywhere` | `desktop` |
 | `redirectBuiltin`: Send Claude's built-in questions to the panel | on, off (`/questions on`, `/questions off`) | on |
+| `allSessions`: Show questions from all sessions | on, off | off |
+
+## All sessions
+
+Turn on **Show questions from all sessions** to see every session's open questions in one place. The panel gets two tabs:
+
+- **This session**: the panel as before.
+- **All sessions**: every session with open questions, grouped by session, this one first. Each group is headed by the name Claude gave that session's work when it asked (the tool's `session` field), with its folder and whether it is running.
+
+Answer another session's questions right there and press **Submit to this session**: the answers go to that session and are submitted there as your message, as if you had typed them in it. A session that is not running keeps its questions in the list, and answers sent to it wait until it is opened again. A session clears its questions once it has the answers, and they disappear from every panel. The band above the prompt mentions questions waiting in other sessions.
+
+A mod can't switch the desktop app to another session, so the panel brings the questions to you instead.
+
+How it works: each session writes its open questions to `<Claude config folder>/question-panel/sessions/<session id>.json` (`CLAUDE_CONFIG_DIR`, else `~/.claude`) and reads the other sessions' files every 3 seconds. Answers for a session are written to `.../sessions/inbox/<session id>--<time>.json`, which that session reads, submits and then empties. Only the questions and your answers are written there, on your own machine.
 
 ## Configuration the mod changes
 
@@ -141,7 +157,9 @@ It changes no other setting and sets no environment variables.
 
 ## What the mod reads
 
-The mod reads only its own two settings (`surfaces` and `redirectBuiltin`, as Claude Code passes them to it) and the question set it keeps in the session's state. It asks for no keys, tokens, or other secrets, and reads nothing else from your machine: no files, environment variables, or other programs' output.
+The mod reads its own settings (`surfaces`, `redirectBuiltin` and `allSessions`, as Claude Code passes them to it) and the question set it keeps in the session's state. It asks for no keys, tokens, or other secrets.
+
+With **Show questions from all sessions** off (the default) it reads nothing else from your machine: no files, environment variables, or other programs' output. With it on, it also reads the environment variables `CLAUDE_CONFIG_DIR`, `USERPROFILE` and `HOME` (only to find the Claude config folder) and the files in its own `question-panel/sessions` folder there, and it asks Claude Code for the session's id.
 
 It sends nothing off your machine. The one web address in the code, `http://www.w3.org/2000/svg` in `hooks/register.tsx`, is the standard SVG namespace name that the number badges' SVG drawings must carry. It identifies the drawing format and is never requested.
 
